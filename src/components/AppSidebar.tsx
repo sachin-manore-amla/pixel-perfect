@@ -29,7 +29,7 @@ const navItems = [
   { title: "P1 Triage", url: "/triage", icon: AlertTriangle },
   { title: "Attention", url: "/attention", icon: Eye },
   { title: "Alerts", url: "/alerts", icon: Bell },
-  { title: "Comment Sync", url: "/sync", icon: MessageSquareSync },
+  { title: "Comment Sync", url: "/sync", icon: MessageSquare },
   { title: "SLA Monitor", url: "/sla", icon: Clock },
 ];
 
