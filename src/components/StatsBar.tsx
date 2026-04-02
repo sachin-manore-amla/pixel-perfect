@@ -9,25 +9,22 @@ export function StatsBar() {
   const resolved = p1.filter((t) => t.status === "Resolved").length;
 
   const stats = [
-    { label: "Total P1", value: p1.length, icon: Activity, color: "text-primary" },
-    { label: "Unattended", value: unattended, icon: Clock, color: "text-critical" },
-    { label: "SLA Breached", value: slaBreached, icon: AlertTriangle, color: "text-warning" },
-    { label: "Needs Response", value: needsAttention, icon: Eye, color: "text-info" },
-    { label: "Resolved", value: resolved, icon: CheckCircle, color: "text-success" },
+    { label: "Total P1", value: p1.length, icon: Activity, borderColor: "border-l-primary" },
+    { label: "Unattended", value: unattended, icon: Clock, borderColor: "border-l-critical" },
+    { label: "SLA Breached", value: slaBreached, icon: AlertTriangle, borderColor: "border-l-warning" },
+    { label: "Needs Response", value: needsAttention, icon: Eye, borderColor: "border-l-info" },
+    { label: "Resolved", value: resolved, icon: CheckCircle, borderColor: "border-l-success" },
   ];
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
       {stats.map((s) => (
         <div
           key={s.label}
-          className="rounded-lg border border-border bg-card p-4 flex items-center gap-3 animate-slide-in"
+          className={`rounded bg-card border border-border border-l-4 ${s.borderColor} p-4 animate-slide-in`}
         >
-          <s.icon className={`h-5 w-5 ${s.color} shrink-0`} />
-          <div>
-            <p className={`text-xl font-bold font-mono ${s.color}`}>{s.value}</p>
-            <p className="text-xs text-muted-foreground">{s.label}</p>
-          </div>
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">{s.label}</p>
+          <p className="text-2xl font-bold text-foreground mt-1">{s.value}</p>
         </div>
       ))}
     </div>
