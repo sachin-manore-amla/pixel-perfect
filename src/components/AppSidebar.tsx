@@ -41,15 +41,15 @@ export function AppSidebar() {
 
   return (
     <Sidebar collapsible="icon">
-      <SidebarHeader className="p-4">
+      <SidebarHeader className="p-4 border-b border-sidebar-border">
         <div className="flex items-center gap-2">
-          <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center shrink-0">
+          <div className="h-8 w-8 rounded bg-primary flex items-center justify-center shrink-0">
             <span className="text-primary-foreground font-bold text-sm">JT</span>
           </div>
           {!collapsed && (
             <div>
               <h2 className="text-sm font-semibold text-foreground">JiraTriage</h2>
-              <p className="text-xs text-muted-foreground">SignalOps Dashboard</p>
+              <p className="text-xs text-muted-foreground">SignalOps</p>
             </div>
           )}
         </div>
@@ -57,7 +57,7 @@ export function AppSidebar() {
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-xs uppercase tracking-wider text-muted-foreground">Navigation</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
@@ -67,12 +67,12 @@ export function AppSidebar() {
                       to={item.url}
                       end
                       className="hover:bg-accent"
-                      activeClassName="bg-accent text-primary font-medium"
+                      activeClassName="bg-accent text-accent-foreground font-medium border-l-2 border-primary"
                     >
                       <item.icon className="mr-2 h-4 w-4 shrink-0" />
                       {!collapsed && <span className="flex-1">{item.title}</span>}
                       {!collapsed && item.title === "Alerts" && unackAlerts > 0 && (
-                        <Badge className="ml-auto bg-critical text-critical-foreground text-xs h-5 px-1.5">
+                        <Badge className="ml-auto bg-critical text-critical-foreground text-xs h-5 px-1.5 rounded">
                           {unackAlerts}
                         </Badge>
                       )}
@@ -85,11 +85,11 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="p-4">
+      <SidebarFooter className="p-4 border-t border-sidebar-border">
         {!collapsed && (
           <div className="flex items-center gap-2">
-            <div className="h-7 w-7 rounded-full bg-accent flex items-center justify-center">
-              <span className="text-xs font-medium text-accent-foreground">KK</span>
+            <div className="h-7 w-7 rounded-full bg-primary flex items-center justify-center">
+              <span className="text-xs font-medium text-primary-foreground">KK</span>
             </div>
             <div>
               <p className="text-xs font-medium text-foreground">Kapil K.</p>

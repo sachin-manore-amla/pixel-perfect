@@ -1,6 +1,5 @@
 import { mockTickets } from "@/data/mockData";
 import { Eye, MessageCircle, Clock } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 
 export function AttentionTracker() {
   const needsAttention = mockTickets.filter(
@@ -10,80 +9,76 @@ export function AttentionTracker() {
 
   return (
     <section>
-      <div className="flex items-center gap-2 mb-4">
-        <Eye className="h-5 w-5 text-primary" />
-        <h2 className="text-lg font-semibold text-foreground">Attention Required</h2>
-      </div>
+      <h2 className="text-lg font-semibold text-foreground mb-4 uppercase tracking-wide">Attention Required</h2>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* New activity after your response */}
-        <div className="rounded-xl border border-border bg-card p-5 animate-slide-in">
+        {/* New activity */}
+        <div className="rounded bg-card border border-border border-l-4 border-l-info p-5 animate-slide-in">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <MessageCircle className="h-4 w-4 text-info" />
-              <span className="text-sm font-medium text-foreground">New Activity</span>
-            </div>
-            <Badge variant="outline" className="border-info/30 text-info text-xs font-mono">
-              {needsAttention.length}
-            </Badge>
+            <span className="text-sm font-semibold text-foreground uppercase tracking-wide">New Activity</span>
+            <span className="text-xs text-primary cursor-pointer hover:underline">View All ({needsAttention.length})</span>
           </div>
-          <div className="space-y-3">
-            {needsAttention.map((t) => (
-              <div key={t.id} className="flex items-start gap-3 p-2 rounded-lg bg-muted/50">
-                <span className="h-1.5 w-1.5 rounded-full bg-info mt-2 shrink-0 pulse-dot" />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono text-muted-foreground">{t.key}</span>
-                    <span className="text-xs text-foreground truncate">{t.summary}</span>
-                  </div>
-                  {t.lastComment && (
-                    <p className="text-xs text-muted-foreground mt-1 truncate">
-                      <span className="text-foreground/70">{t.lastComment.author}:</span> {t.lastComment.text}
-                    </p>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border">
+                <th className="text-left py-1.5 font-semibold text-muted-foreground uppercase tracking-wider">Ticket</th>
+                <th className="text-left py-1.5 font-semibold text-muted-foreground uppercase tracking-wider">Last Comment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {needsAttention.map((t) => (
+                <tr key={t.id} className="border-b border-border last:border-0">
+                  <td className="py-2">
+                    <span className="font-mono text-primary cursor-pointer hover:underline">{t.key}</span>
+                    <p className="text-muted-foreground truncate mt-0.5 max-w-[200px]">{t.summary}</p>
+                  </td>
+                  <td className="py-2 text-muted-foreground">
+                    {t.lastComment && (
+                      <p className="truncate max-w-[200px]">
+                        <span className="text-foreground">{t.lastComment.author}:</span> {t.lastComment.text}
+                      </p>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
 
-        {/* Unattended tickets */}
-        <div className="rounded-xl border border-border bg-card p-5 animate-slide-in">
+        {/* Unattended */}
+        <div className="rounded bg-card border border-border border-l-4 border-l-critical p-5 animate-slide-in">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-critical" />
-              <span className="text-sm font-medium text-foreground">Unattended</span>
-            </div>
-            <Badge variant="outline" className="border-critical/30 text-critical text-xs font-mono">
-              {unattended.length}
-            </Badge>
+            <span className="text-sm font-semibold text-foreground uppercase tracking-wide">Unattended</span>
+            <span className="text-xs text-primary cursor-pointer hover:underline">View All ({unattended.length})</span>
           </div>
-          <div className="space-y-3">
-            {unattended.map((t) => {
-              const hoursOld = Math.round(
-                (Date.now() - t.createdAt.getTime()) / 3600000
-              );
-              return (
-                <div key={t.id} className="flex items-start gap-3 p-2 rounded-lg bg-muted/50">
-                  <span className="h-1.5 w-1.5 rounded-full bg-critical mt-2 shrink-0 pulse-dot" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="text-xs font-mono text-muted-foreground">{t.key}</span>
-                        <span className="text-xs text-foreground truncate">{t.summary}</span>
-                      </div>
-                      <span className="text-xs font-mono text-critical shrink-0">
-                        {hoursOld < 24 ? `${hoursOld}h` : `${Math.round(hoursOld / 24)}d`}
-                      </span>
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {t.assignee === "Unassigned" ? "⚠ Unassigned" : `Assigned: ${t.assignee}`}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border">
+                <th className="text-left py-1.5 font-semibold text-muted-foreground uppercase tracking-wider">Ticket</th>
+                <th className="text-left py-1.5 font-semibold text-muted-foreground uppercase tracking-wider">Assignee</th>
+                <th className="text-right py-1.5 font-semibold text-muted-foreground uppercase tracking-wider">Age</th>
+              </tr>
+            </thead>
+            <tbody>
+              {unattended.map((t) => {
+                const hoursOld = Math.round((Date.now() - t.createdAt.getTime()) / 3600000);
+                return (
+                  <tr key={t.id} className="border-b border-border last:border-0">
+                    <td className="py-2">
+                      <span className="font-mono text-primary cursor-pointer hover:underline">{t.key}</span>
+                      <p className="text-muted-foreground truncate mt-0.5 max-w-[180px]">{t.summary}</p>
+                    </td>
+                    <td className="py-2 text-foreground">
+                      {t.assignee === "Unassigned" ? <span className="text-critical">Unassigned</span> : t.assignee}
+                    </td>
+                    <td className="py-2 text-right font-mono text-critical">
+                      {hoursOld < 24 ? `${hoursOld}h` : `${Math.round(hoursOld / 24)}d`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </div>
     </section>
