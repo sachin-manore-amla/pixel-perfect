@@ -2,7 +2,7 @@ import {
   LayoutDashboard,
   AlertTriangle,
   Eye,
-  MessageSquareSync,
+  MessageSquare,
   Clock,
   Bell,
 } from "lucide-react";
