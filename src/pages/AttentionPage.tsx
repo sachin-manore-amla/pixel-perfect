@@ -142,7 +142,7 @@ const AttentionPage = () => {
         <div className="rounded bg-card border border-border border-l-4 border-l-info p-5">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h2 className="text-sm font-semibold text-foreground uppercase tracking-wide">P1 Dev In Progress - Tickets Needing Attention</h2>
+              <h2 className="text-sm font-semibold text-foreground uppercase tracking-wide">P1 Tickets Needing Attention</h2>
               <p className="text-xs text-muted-foreground mt-1">{getWindowLabel()}</p>
             </div>
             {isLoading && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
@@ -230,7 +230,7 @@ const AttentionPage = () => {
         {/* P1 Unattended Tickets Section */}
         <div className="mt-8">
           <div className="mb-4">
-            <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">P1 Unattended Tickets (Only 1 Watcher)</h2>
+            <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">P1 Unattended Tickets</h2>
             <p className="text-sm text-muted-foreground mt-1">Recent P1 tickets with new comments</p>
           </div>
           <NewActivityTable items={recentActivity} isLoading={recentActivityLoading} />
