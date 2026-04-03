@@ -131,7 +131,7 @@ export function AttentionTrackerDashboard() {
     <section className="space-y-4">
       <div>
         <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">Attention Tracker</h2>
-        <p className="text-sm text-muted-foreground mt-1">P1 Dev In Progress - Tickets needing response</p>
+        <p className="text-sm text-muted-foreground mt-1">P1 Tickets needing response</p>
       </div>
 
       <div className="grid grid-cols-3 gap-4">
