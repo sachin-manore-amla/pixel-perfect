@@ -5,6 +5,7 @@ import {
   MessageSquare,
   Clock,
   Bell,
+  Brain,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -28,6 +29,7 @@ const navItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
   { title: "P1 Triage", url: "/triage", icon: AlertTriangle },
   { title: "Attention", url: "/attention", icon: Eye },
+  { title: "AI Insights", url: "/#ai", icon: Brain },
   { title: "Alerts", url: "/alerts", icon: Bell },
   { title: "Comment Sync", url: "/sync", icon: MessageSquare },
   { title: "SLA Monitor", url: "/sla", icon: Clock },
