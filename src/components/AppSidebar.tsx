@@ -29,7 +29,7 @@ const navItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
   { title: "P1 Triage", url: "/triage", icon: AlertTriangle },
   { title: "Attention", url: "/attention", icon: Eye },
-  { title: "AI Insights", url: "/#ai", icon: Brain },
+  { title: "AI Insights", url: "/ai-insights", icon: Brain },
   { title: "Alerts", url: "/alerts", icon: Bell },
   { title: "Comment Sync", url: "/sync", icon: MessageSquare },
   { title: "SLA Monitor", url: "/sla", icon: Clock },
