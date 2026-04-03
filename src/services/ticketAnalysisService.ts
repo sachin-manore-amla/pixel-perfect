@@ -365,6 +365,12 @@ export async function fetchRecentActivity(daysWindow: number = 1): Promise<NewAc
             // Only include if comment is recent enough
             if (commentDate >= cutoffDate) {
               const commentText = extractCommentText(latestComment.body);
+              
+              // Skip tickets marked as "attended" or "acknowledged"
+              if (commentText.toLowerCase().includes("attended") || commentText.toLowerCase().includes("acknowledged")) {
+                console.log(`[Tickets Service] Skipping ${ticket.key}: Latest comment mentions "attended" or "acknowledged"`);
+                continue;
+              }
 
               recentActivity.push({
                 ticketKey: ticket.key,
