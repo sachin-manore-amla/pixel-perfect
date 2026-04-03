@@ -14,7 +14,7 @@ export interface AITicketInsight {
 
 export const aiInsights: AITicketInsight[] = [
   {
-    ticketKey: "OPS-101",
+    ticketKey: "Z10LMC-3001",
     priorityScore: 95,
     priorityReason: "Production payment gateway down — multiple customers impacted, escalation language detected in comments",
     sentiment: "critical",
@@ -29,7 +29,7 @@ export const aiInsights: AITicketInsight[] = [
     slaRisk: { likelihood: 78, minutesUntilBreach: 60 },
   },
   {
-    ticketKey: "OPS-098",
+    ticketKey: "Z10LMC-3002",
     priorityScore: 88,
     priorityReason: "SLA already breached — database connection pool exhaustion with active remediation in progress",
     sentiment: "urgent",
@@ -43,7 +43,7 @@ export const aiInsights: AITicketInsight[] = [
     customerFriendlyComment: "We've applied an immediate fix to resolve the performance issues you may have experienced. Our team is implementing a permanent solution to prevent recurrence.",
   },
   {
-    ticketKey: "OPS-095",
+    ticketKey: "Z10LMC-3003",
     priorityScore: 92,
     priorityReason: "Unassigned P1 for 18 hours — auth service critical, no human response, SLA violated",
     sentiment: "critical",
@@ -56,7 +56,7 @@ export const aiInsights: AITicketInsight[] = [
     slaRisk: { likelihood: 100, minutesUntilBreach: null },
   },
   {
-    ticketKey: "OPS-087",
+    ticketKey: "Z10LMC-3004",
     priorityScore: 62,
     priorityReason: "Fix deployed to staging, awaiting QA — moderate risk, actively being worked",
     sentiment: "moderate",
@@ -69,7 +69,7 @@ export const aiInsights: AITicketInsight[] = [
     customerFriendlyComment: "We've developed and tested a fix for the content delivery issue. It's currently in final validation before being released to production.",
   },
   {
-    ticketKey: "OPS-082",
+    ticketKey: "Z10LMC-3005",
     priorityScore: 55,
     priorityReason: "Active investigation with heap dump analysis — waiting state but progressing",
     sentiment: "moderate",
@@ -80,7 +80,7 @@ export const aiInsights: AITicketInsight[] = [
     ],
   },
   {
-    ticketKey: "EXT-210",
+    ticketKey: "Z10LMC-3009",
     priorityScore: 82,
     priorityReason: "Customer-facing dashboard failures — root cause found but fix not yet deployed",
     sentiment: "urgent",
@@ -93,7 +93,7 @@ export const aiInsights: AITicketInsight[] = [
     customerFriendlyComment: "We've identified the cause of the dashboard loading issues and are deploying a fix shortly. Your dashboard will be fully functional once the update is complete.",
   },
   {
-    ticketKey: "EXT-205",
+    ticketKey: "Z10LMC-3010",
     priorityScore: 90,
     priorityReason: "Enterprise clients impacted — unassigned for 5 days, high business risk",
     sentiment: "critical",

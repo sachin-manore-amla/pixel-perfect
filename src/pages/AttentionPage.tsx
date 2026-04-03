@@ -24,28 +24,28 @@ const AttentionPage = () => {
   // Sample data for New Activity Since Your Last Comment
   const dummyNewActivity = [
     {
-      ticketKey: "OPS-098",
+      ticketKey: "Z10LMC-3002",
       summary: "Database connection pool exhaustion",
       lastComment: { author: "Mike Torres", text: "Pool size increased, monitoring" },
       assignee: "Mike Torres",
       commentedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
     },
     {
-      ticketKey: "OPS-087",
+      ticketKey: "Z10LMC-3004",
       summary: "CDN cache invalidation not propagating",
       lastComment: { author: "Priya Sharma", text: "Fix deployed to staging, needs QA verification" },
       assignee: "Priya Sharma",
       commentedAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
     },
     {
-      ticketKey: "OPS-082",
+      ticketKey: "Z10LMC-3005",
       summary: "Memory leak in notification service",
       lastComment: { author: "DevOps", text: "Heap dump analysis in progress" },
       assignee: "James Liu",
       commentedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
     },
     {
-      ticketKey: "OPS-068",
+      ticketKey: "Z10LMC-3007",
       summary: "Rate limiter misconfigured for partner API",
       lastComment: { author: "Tom Wilson", text: "Rate limit adjusted, partner team to verify" },
       assignee: "Tom Wilson",

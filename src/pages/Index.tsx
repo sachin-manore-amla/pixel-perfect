@@ -2,7 +2,6 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatsBar } from "@/components/StatsBar";
 import { P1BucketSection } from "@/components/P1BucketSection";
 import { AttentionTrackerDashboard } from "@/components/AttentionTrackerDashboard";
-import { AlertsPanel } from "@/components/AlertsPanel";
 
 const Index = () => {
   return (
@@ -17,8 +16,6 @@ const Index = () => {
         <StatsBar />
         <P1BucketSection />
         <AttentionTrackerDashboard />
-
-        <AlertsPanel />
       </div>
     </DashboardLayout>
   );
