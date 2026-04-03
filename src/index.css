@@ -46,6 +46,10 @@
     --info: 210 80% 50%;
     --info-foreground: 0 0% 100%;
 
+    /* AI token */
+    --ai: 265 70% 55%;
+    --ai-foreground: 0 0% 100%;
+
     /* Surface tokens */
     --surface-elevated: 0 0% 100%;
     --surface-overlay: 0 0% 98%;
