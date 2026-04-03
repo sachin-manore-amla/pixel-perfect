@@ -6,9 +6,11 @@ import {
   Clock,
   Bell,
   Brain,
+  Settings,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
 import {
   Sidebar,
   SidebarContent,
@@ -23,7 +25,16 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
+import { JiraConfigDialog } from "@/components/JiraConfigDialog";
+import { useJiraAPI } from "@/hooks/use-jira-config";
 import { mockAlerts } from "@/data/mockData";
+
+interface JiraUser {
+  displayName: string;
+  emailAddress?: string;
+  name?: string;
+  accountType?: string;
+}
 
 const navItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
@@ -33,6 +44,7 @@ const navItems = [
   { title: "Alerts", url: "/alerts", icon: Bell },
   { title: "Comment Sync", url: "/sync", icon: MessageSquare },
   { title: "SLA Monitor", url: "/sla", icon: Clock },
+  { title: "Settings", url: "/settings", icon: Settings },
 ];
 
 export function AppSidebar() {
@@ -40,6 +52,45 @@ export function AppSidebar() {
   const collapsed = state === "collapsed";
   const location = useLocation();
   const unackAlerts = mockAlerts.filter((a) => !a.acknowledged).length;
+  const { get, isConfigured } = useJiraAPI();
+  const [user, setUser] = useState<JiraUser | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Fetch current user info when Jira is configured
+  useEffect(() => {
+    if (!isConfigured) {
+      setUser(null);
+      return;
+    }
+
+    const fetchUser = async () => {
+      setLoading(true);
+      try {
+        const userData = await get<JiraUser>("/myself");
+        setUser(userData);
+      } catch (error) {
+        console.error("Failed to fetch user info:", error);
+        setUser(null);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchUser();
+  }, [isConfigured, get]);
+
+  // Get user initials
+  const getInitials = (name: string): string => {
+    return name
+      .split(" ")
+      .slice(0, 2)
+      .map((n) => n[0].toUpperCase())
+      .join("");
+  };
+
+  const displayName = user?.displayName || "User";
+  const initials = getInitials(displayName);
+  const role = user?.accountType === "atlassian" ? "Bot" : "Developer";
 
   return (
     <Sidebar collapsible="icon">
@@ -89,14 +140,22 @@ export function AppSidebar() {
 
       <SidebarFooter className="p-4 border-t border-sidebar-border">
         {!collapsed && (
-          <div className="flex items-center gap-2">
-            <div className="h-7 w-7 rounded-full bg-primary flex items-center justify-center">
-              <span className="text-xs font-medium text-primary-foreground">KK</span>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 flex-1">
+              <div className="h-7 w-7 rounded-full bg-primary flex items-center justify-center shrink-0">
+                <span className="text-xs font-medium text-primary-foreground">{initials}</span>
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-foreground truncate">{displayName}</p>
+                <p className="text-xs text-muted-foreground">{role}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-xs font-medium text-foreground">Kapil K.</p>
-              <p className="text-xs text-muted-foreground">Manager</p>
-            </div>
+            <JiraConfigDialog />
+          </div>
+        )}
+        {collapsed && (
+          <div className="flex justify-center">
+            <JiraConfigDialog />
           </div>
         )}
       </SidebarFooter>

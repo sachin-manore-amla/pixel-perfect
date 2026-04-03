@@ -10,6 +10,8 @@ import AIInsightsPage from "./pages/AIInsightsPage.tsx";
 import AlertsPage from "./pages/AlertsPage.tsx";
 import CommentSyncPage from "./pages/CommentSyncPage.tsx";
 import SLAMonitorPage from "./pages/SLAMonitorPage.tsx";
+import Settings from "./pages/Settings.tsx";
+import P1Triage from "./pages/P1Triage.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -22,12 +24,13 @@ const App = () => (
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Index />} />
-          <Route path="/triage" element={<TriagePage />} />
+          <Route path="/triage" element={<P1Triage />} />
           <Route path="/attention" element={<AttentionPage />} />
           <Route path="/ai-insights" element={<AIInsightsPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/sync" element={<CommentSyncPage />} />
           <Route path="/sla" element={<SLAMonitorPage />} />
+          <Route path="/settings" element={<Settings />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
