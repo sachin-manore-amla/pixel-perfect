@@ -5,7 +5,7 @@ import { useTicketsWithAnalysis } from "@/hooks/useTicketsWithAnalysis";
 import { useRecentActivity } from "@/hooks/useRecentActivity";
 import { CommentsTimeline } from "@/components/CommentsTimeline";
 import { NewActivityTable } from "@/components/NewActivityTable";
-
+ 
 const AttentionPage = () => {
   const [daysWindow, setDaysWindow] = useState<1 | 15 | 30>(30);
   const [expandedTicket, setExpandedTicket] = useState<string | null>(null);
@@ -14,13 +14,13 @@ const AttentionPage = () => {
   const attentionRequired = analysisData?.attentionRequired || [];
   const attentionCount = analysisData?.attentionCount || 0;
   const recentActivity = recentActivityData || [];
-
+ 
   const getWindowLabel = () => {
     if (daysWindow === 1) return "Last 24 Hours";
     if (daysWindow === 15) return "Last 15 Days";
     return "Last 30 Days";
   };
-
+ 
   // Sample data for New Activity Since Your Last Comment
   const dummyNewActivity = [
     {
@@ -52,7 +52,7 @@ const AttentionPage = () => {
       commentedAt: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(),
     },
   ];
-
+ 
   if (error) {
     return (
       <DashboardLayout>
@@ -72,7 +72,7 @@ const AttentionPage = () => {
             <h1 className="text-2xl font-bold text-foreground">Attention Tracker</h1>
             <p className="text-sm text-muted-foreground mt-1">P1 Dev In Progress tickets requiring your response or immediate attention</p>
           </div>
-          
+         
           {/* Time Window Filter */}
           <div className="flex gap-2">
             <button
@@ -107,7 +107,7 @@ const AttentionPage = () => {
             </button>
           </div>
         </div>
-
+ 
         {/* Stats Cards */}
         <div className="grid grid-cols-3 gap-4">
           <div className="rounded bg-card border border-border border-l-4 border-l-info p-4 animate-slide-in">
@@ -121,7 +121,7 @@ const AttentionPage = () => {
             </div>
             <p className="text-xs text-muted-foreground mt-2">{getWindowLabel()}</p>
           </div>
-
+ 
           <div className="rounded bg-card border border-border border-l-4 border-l-critical p-4 animate-slide-in">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-muted-foreground" />
@@ -129,7 +129,7 @@ const AttentionPage = () => {
             </div>
             <p className="text-2xl font-bold text-foreground mt-1">0</p>
           </div>
-
+ 
           <div className="rounded bg-card border border-border border-l-4 border-l-primary p-4 animate-slide-in">
             <div className="flex items-center gap-2">
               <Eye className="h-4 w-4 text-muted-foreground" />
@@ -138,7 +138,7 @@ const AttentionPage = () => {
             <p className="text-2xl font-bold text-foreground mt-1">0</p>
           </div>
         </div>
-
+ 
         {/* Attention Required Section */}
         <div className="rounded bg-card border border-border border-l-4 border-l-info p-5">
           <div className="flex items-center justify-between mb-3">
@@ -200,7 +200,7 @@ const AttentionPage = () => {
                       )}
                     </div>
                   </button>
-
+ 
                   {/* Comments Timeline - Expandable */}
                   {expandedTicket === ticket.ticketKey && (
                     <div className="border-t border-border px-4 py-4 bg-muted/20">
@@ -218,7 +218,7 @@ const AttentionPage = () => {
             </div>
           )}
         </div>
-
+ 
         {/* New Activity Since Your Last Comment Section */}
         <div className="mt-8">
           <div className="mb-4">
@@ -227,7 +227,7 @@ const AttentionPage = () => {
           </div>
           <NewActivityTable items={dummyNewActivity} isLoading={false} />
         </div>
-
+ 
         {/* P1 Unattended Tickets Section */}
         <div className="mt-8">
           <div className="mb-4">
@@ -240,5 +240,5 @@ const AttentionPage = () => {
     </DashboardLayout>
   );
 };
-
+ 
 export default AttentionPage;

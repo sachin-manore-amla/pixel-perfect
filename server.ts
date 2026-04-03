@@ -434,6 +434,55 @@ app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: R
 });
 
 /**
+ * POST /api/jira/check-user-commented
+ * Check if current user has commented on specific tickets
+ */
+app.post("/api/jira/check-user-commented", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const { issueKeys } = req.body;
+    if (!issueKeys || !Array.isArray(issueKeys)) {
+      return res.status(400).json({ error: "issueKeys array is required" });
+    }
+
+    // Get current user
+    const userResponse = await makeJiraRequest("GET", `/myself`);
+    const currentUser = await userResponse.json();
+    const currentUserEmail = currentUser.emailAddress;
+
+    // Check comments for each issue
+    const results: { [key: string]: boolean } = {};
+
+    for (const issueKey of issueKeys) {
+      try {
+        const commentsResponse = await makeJiraRequest("GET", `/issues/${issueKey}?fields=comment`);
+        const issueData = await commentsResponse.json();
+        
+        if (issueData.fields && issueData.fields.comment) {
+          const comments = issueData.fields.comment.comments || [];
+          // Check if current user has any comments on this issue
+          const hasCommented = comments.some(
+            (comment: any) => comment.author.emailAddress === currentUserEmail
+          );
+          results[issueKey] = hasCommented;
+        } else {
+          results[issueKey] = false;
+        }
+      } catch (error) {
+        console.error(`Error checking comments for ${issueKey}:`, error);
+        results[issueKey] = false;
+      }
+    }
+
+    res.json({ results });
+  } catch (error) {
+    console.error("[CHECK COMMENTED ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to check comments",
+    });
+  }
+});
+
+/**
  * POST /api/jira/check-watching
  * Check if current user is watching specific issues
  */
