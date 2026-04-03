@@ -1,7 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatsBar } from "@/components/StatsBar";
 import { P1BucketSection } from "@/components/P1BucketSection";
-import { AttentionTracker } from "@/components/AttentionTracker";
+import { AttentionTrackerDashboard } from "@/components/AttentionTrackerDashboard";
 import { AlertsPanel } from "@/components/AlertsPanel";
 import { AIPriorityScoring } from "@/components/AIPriorityScoring";
 import { AITicketSummaries } from "@/components/AITicketSummaries";
@@ -21,7 +21,7 @@ const Index = () => {
         </div>
         <StatsBar />
         <P1BucketSection />
-        <AttentionTracker />
+        <AttentionTrackerDashboard />
 
         {/* AI Intelligence Layer */}
         <section>

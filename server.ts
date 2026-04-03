@@ -1,7 +1,11 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "path";
 
+// Load environment variables from .env.local first, then .env
+dotenv.config({ path: path.join(process.cwd(), ".env.local") });
+dotenv.config({ path: path.join(process.cwd(), ".env") });
 dotenv.config();
 
 const app = express();
@@ -20,6 +24,27 @@ interface JiraConfig {
 
 let jiraConfig: JiraConfig | null = null;
 
+// Initialize JIRA config from environment variables at startup
+const initJiraConfig = () => {
+  const instanceUrl = process.env.VITE_JIRA_API_URL;
+  const email = process.env.VITE_JIRA_USERNAME;
+  const apiToken = process.env.VITE_JIRA_PASSWORD;
+
+  if (instanceUrl && email && apiToken) {
+    jiraConfig = {
+      instanceUrl: instanceUrl.replace(/\/$/, ""),
+      email,
+      apiToken,
+    };
+    console.log("[INIT] JIRA config initialized from environment variables");
+  } else {
+    console.warn("[INIT] JIRA credentials not found in environment variables");
+  }
+};
+
+// Initialize on startup
+initJiraConfig();
+
 // Middleware to validate Jira config
 const requireJiraConfig = (req: Request, res: Response, next: NextFunction) => {
   if (!jiraConfig) {
@@ -35,7 +60,7 @@ async function makeJiraRequest(
   method: string,
   endpoint: string,
   body?: unknown
-): Promise<Response> {
+): Promise<globalThis.Response> {
   if (!jiraConfig) {
     throw new Error("Jira configuration not found");
   }
@@ -119,13 +144,14 @@ app.post("/api/jira/test", async (req: Request, res: Response) => {
 
     try {
       const response = await makeJiraRequest("GET", "/myself");
+      const fetchResponse = response as globalThis.Response;
 
-      if (response.ok) {
+      if (fetchResponse.ok) {
         res.json({ success: true, message: "Connection successful" });
       } else {
-        res.status(response.status).json({
+        res.status(fetchResponse.status).json({
           success: false,
-          error: `Jira API returned ${response.status}`,
+          error: `Jira API returned ${fetchResponse.status}`,
         });
       }
     } finally {
@@ -267,7 +293,7 @@ app.patch("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respon
 
     const response = await makeJiraRequest("PATCH", endpoint, req.body);
 
-    if (response.status === 204) {
+   if (response.status === 204) {
       res.status(204).send();
     } else {
       const data = await response.json();
@@ -298,11 +324,11 @@ app.delete("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respo
 
     const response = await makeJiraRequest("DELETE", endpoint);
 
-    if (response.status === 204) {
+    if ((response as any).status === 204) {
       res.status(204).send();
     } else {
       const data = await response.json();
-      res.status(response.status).json(data);
+      res.status((response as any).status).json(data);
     }
   } catch (error) {
     console.error("[PROXY ERROR]", error);
@@ -380,7 +406,7 @@ app.get("/api/jira/watchers/:issueKey", requireJiraConfig, async (req: Request, 
     const response = await makeJiraRequest("GET", `/issue/${issueKey}/watchers`);
     const data = await response.json();
 
-    res.status(response.status).json(data);
+    res.status((response as any).status).json(data);
   } catch (error) {
     console.error("[WATCHERS ERROR]", error);
     res.status(500).json({
@@ -398,7 +424,7 @@ app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: R
     const response = await makeJiraRequest("GET", `/myself`);
     const data = await response.json();
 
-    res.status(response.status).json(data);
+    res.status((response as any).status).json(data);
   } catch (error) {
     console.error("[CURRENT USER ERROR]", error);
     res.status(500).json({
@@ -434,7 +460,7 @@ app.post("/api/jira/check-watching", requireJiraConfig, async (req: Request, res
         const watchersData = await watchersResponse.json();
         const watchers = watchersData.watchers || [];
         // Check if current user is in watchers list
-        watchingStatus[issueKey] = watchers.some((w: any) => w.accountId === currentUser.accountId);
+        watchingStatus[issueKey] = watchers.some((w: any) => w.accountId === (currentUser as any).accountId);
       } else {
         watchingStatus[issueKey] = false;
       }
@@ -469,7 +495,7 @@ app.post("/api/jira/watch-ticket", requireJiraConfig, async (req: Request, res: 
 
     // Add current user as watcher
     const watchResponse = await makeJiraRequest("POST", `/issue/${issueKey}/watchers`, {
-      accountId: currentUser.accountId,
+      accountId: (currentUser as any).accountId,
     });
 
     if (watchResponse.ok) {
