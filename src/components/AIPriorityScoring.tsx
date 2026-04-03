@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
-import { Brain, TrendingUp, TrendingDown, Loader2 } from "lucide-react";
+import { Brain, TrendingUp, TrendingDown, Loader2, ExternalLink } from "lucide-react";
 
 interface JiraIssue {
   key: string;
@@ -187,12 +187,21 @@ export function AIPriorityScoring() {
                       href={`${jiraUrl}/browse/${insight.ticketKey}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="font-mono text-xs text-primary cursor-pointer hover:underline transition-colors"
+                      className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1"
                     >
                       {insight.ticketKey}
+                      <ExternalLink className="h-3 w-3" />
                     </a>
                   ) : (
-                    <span className="font-mono text-xs text-primary cursor-pointer hover:underline">{insight.ticketKey}</span>
+                    <a
+                      href={`https://amla.atlassian.net/browse/${insight.ticketKey}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1"
+                    >
+                      {insight.ticketKey}
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
                   )}
                   <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
                     insight.sentiment === "critical" ? "bg-critical/10 text-critical" :

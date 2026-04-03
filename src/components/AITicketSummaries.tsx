@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
-import { FileText, ChevronRight, Loader2 } from "lucide-react";
+import { FileText, ChevronRight, Loader2, ExternalLink } from "lucide-react";
 
 interface JiraIssue {
   key: string;
@@ -38,6 +38,24 @@ export function AITicketSummaries() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [jiraUrl, setJiraUrl] = useState<string>("");
+
+  useEffect(() => {
+    // Fetch Jira config to get instance URL
+    const fetchJiraConfig = async () => {
+      try {
+        const response = await fetch("/api/jira/config");
+        const data = await response.json();
+        if (data.instanceUrl) {
+          setJiraUrl(data.instanceUrl);
+        }
+      } catch (err) {
+        console.error("Failed to fetch Jira config:", err);
+      }
+    };
+
+    fetchJiraConfig();
+  }, []);
 
   useEffect(() => {
     if (!isConfigured) {
@@ -111,7 +129,27 @@ export function AITicketSummaries() {
             >
               <div className="flex items-center gap-3 p-3">
                 <ChevronRight className={`h-3.5 w-3.5 text-muted-foreground transition-transform shrink-0 ${expanded === summary.ticketKey ? "rotate-90" : ""}`} />
-                <span className="font-mono text-xs text-primary shrink-0">{summary.ticketKey}</span>
+                {jiraUrl ? (
+                  <a
+                    href={`${jiraUrl}/browse/${summary.ticketKey}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1 shrink-0"
+                  >
+                    {summary.ticketKey}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                ) : (
+                  <a
+                    href={`https://amla.atlassian.net/browse/${summary.ticketKey}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1 shrink-0"
+                  >
+                    {summary.ticketKey}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
                 <p className="text-xs text-foreground truncate flex-1">{summary.originalSummary.substring(0, 50)}...</p>
                 <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${
                   summary.sentiment === "critical" ? "bg-critical/10 text-critical" :
