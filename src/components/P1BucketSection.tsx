@@ -47,6 +47,27 @@ function getTimeBucket(createdDate: string): "24h" | "15d" | "30d" | "older" {
   return "older";
 }
 
+function getPriorityColor(priority?: string) {
+  if (!priority) return "bg-gray-100 text-gray-800 border-gray-300";
+  const lower = priority.toLowerCase();
+  if (lower.includes("highest") || lower.includes("p0")) return "bg-red-100 text-red-800 border-red-300";
+  if (lower.includes("high") || lower.includes("p1")) return "bg-orange-100 text-orange-800 border-orange-300";
+  if (lower.includes("medium") || lower.includes("p2")) return "bg-yellow-100 text-yellow-800 border-yellow-300";
+  if (lower.includes("low") || lower.includes("p3")) return "bg-blue-100 text-blue-800 border-blue-300";
+  return "bg-gray-100 text-gray-800 border-gray-300";
+}
+
+function getStatusColor(status?: string) {
+  if (!status) return "bg-gray-100 text-gray-800 border-gray-300";
+  const lower = status.toLowerCase();
+  if (lower.includes("done") || lower.includes("resolved")) return "bg-emerald-100 text-emerald-800 border-emerald-300";
+  if (lower.includes("in progress")) return "bg-blue-100 text-blue-800 border-blue-300";
+  if (lower.includes("waiting") || lower.includes("blocked")) return "bg-amber-100 text-amber-800 border-amber-300";
+  if (lower.includes("open") || lower.includes("new")) return "bg-red-100 text-red-800 border-red-300";
+  if (lower.includes("qa")) return "bg-purple-100 text-purple-800 border-purple-300";
+  return "bg-gray-100 text-gray-800 border-gray-300";
+}
+
 function BucketCard({
   label,
   count,
@@ -66,45 +87,53 @@ function BucketCard({
 
   return (
     <div
-      className={`rounded bg-card border border-border border-l-4 ${borderColor} p-5 animate-slide-in`}
+      className={`rounded-lg bg-card border-2 border-border border-l-4 ${borderColor} p-6 animate-slide-in shadow-sm hover:shadow-md transition-shadow`}
     >
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-sm font-semibold text-foreground uppercase tracking-wide">
+      <div className="flex items-center justify-between mb-5">
+        <span className="text-sm font-bold text-foreground uppercase tracking-widest">
           {label}
         </span>
-        <div className="flex items-center gap-2">
-          {isLoading && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
-          <span className="text-2xl font-bold text-foreground">{count}</span>
+        <div className="flex items-center gap-3">
+          {isLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
+          <span className="text-3xl font-bold text-primary">{count}</span>
         </div>
       </div>
 
       {isLoading ? (
-        <div className="flex items-center justify-center py-8">
+        <div className="flex items-center justify-center py-12">
           <Loader2 className="h-6 w-6 animate-spin text-primary" />
         </div>
       ) : issues.length === 0 ? (
-        <p className="text-xs text-muted-foreground py-4">No P1 tickets in this period</p>
+        <p className="text-sm text-muted-foreground py-8 text-center">No P1 tickets in this period</p>
       ) : (
         <>
           <div className="space-y-2">
             {displayIssues.map((issue) => (
-              <div key={issue.id} className="flex items-center gap-2 p-2 rounded hover:bg-muted/50">
+              <div key={issue.id} className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 transition-colors">
                 <a
                   href={`https://amla.atlassian.net/browse/${issue.key}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-mono text-primary hover:underline flex items-center gap-1"
+                  className="font-mono text-sm font-semibold text-primary hover:underline flex items-center gap-2 min-w-0"
                 >
                   {issue.key}
-                  <ExternalLink className="h-3 w-3" />
+                  <ExternalLink className="h-3.5 w-3.5 flex-shrink-0" />
                 </a>
+                <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                  <div className={`px-2.5 py-1 rounded text-xs font-semibold border ${getPriorityColor(issue.fields.priority?.name)}`}>
+                    {issue.fields.priority?.name || "N/A"}
+                  </div>
+                  <div className={`px-2.5 py-1 rounded text-xs font-semibold border ${getStatusColor(issue.fields.status.name)}`}>
+                    {issue.fields.status.name}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
           {count > 5 && (
             <button
               onClick={onViewAll}
-              className="text-xs text-primary mt-3 hover:underline font-medium"
+              className="text-sm text-primary font-semibold mt-4 hover:text-primary/80 transition-colors w-full py-2 rounded border border-primary/30 hover:border-primary/60 hover:bg-primary/5"
             >
               View All ({count})
             </button>
@@ -130,45 +159,53 @@ function AllIssuesModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{label} - All P1 Tickets ({issues.length})</DialogTitle>
-          <DialogDescription>
-            Complete list of P1 priority tickets for this time period
+          <DialogTitle className="text-2xl font-bold">{label}</DialogTitle>
+          <DialogDescription className="text-base">
+            Complete list of P1 priority tickets for this time period ({issues.length} total)
           </DialogDescription>
         </DialogHeader>
 
-        <div className="mt-4">
+        <div className="mt-6">
           <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-card border-b border-border">
+            <thead className="sticky top-0 bg-muted border-b-2 border-border">
               <tr>
-                <th className="text-left py-2 px-2 font-semibold text-foreground">Ticket</th>
-                <th className="text-left py-2 px-2 font-semibold text-foreground">Summary</th>
-                <th className="text-left py-2 px-2 font-semibold text-foreground">Status</th>
-                <th className="text-left py-2 px-2 font-semibold text-foreground">Assignee</th>
-                <th className="text-left py-2 px-2 font-semibold text-foreground">Created</th>
+                <th className="text-left py-3 px-3 font-bold text-foreground">Ticket</th>
+                <th className="text-left py-3 px-3 font-bold text-foreground">Summary</th>
+                <th className="text-left py-3 px-3 font-bold text-foreground">Priority</th>
+                <th className="text-left py-3 px-3 font-bold text-foreground">Status</th>
+                <th className="text-left py-3 px-3 font-bold text-foreground">Assignee</th>
+                <th className="text-left py-3 px-3 font-bold text-foreground">Created</th>
               </tr>
             </thead>
             <tbody>
               {issues.map((issue) => (
-                <tr key={issue.id} className="border-b border-border hover:bg-muted/50">
-                  <td className="py-2 px-2 font-mono text-primary">
+                <tr key={issue.id} className="border-b border-border hover:bg-muted/50 transition-colors">
+                  <td className="py-3 px-3 font-mono font-semibold text-primary">
                     <a
                       href={`https://amla.atlassian.net/browse/${issue.key}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="hover:underline flex items-center gap-2"
+                      className="hover:underline inline-flex items-center gap-2"
                     >
                       {issue.key}
-                      <ExternalLink className="h-3 w-3" />
+                      <ExternalLink className="h-3.5 w-3.5" />
                     </a>
                   </td>
-                  <td className="py-2 px-2 text-foreground">{issue.fields.summary}</td>
-                  <td className="py-2 px-2">
-                    <Badge variant="outline">{issue.fields.status.name}</Badge>
+                  <td className="py-3 px-3 text-foreground text-sm">{issue.fields.summary}</td>
+                  <td className="py-3 px-3">
+                    <div className={`px-2.5 py-1 rounded text-xs font-semibold border w-fit ${getPriorityColor(issue.fields.priority?.name)}`}>
+                      {issue.fields.priority?.name || "N/A"}
+                    </div>
                   </td>
-                  <td className="py-2 px-2 text-muted-foreground">
+                  <td className="py-3 px-3">
+                    <div className={`px-2.5 py-1 rounded text-xs font-semibold border w-fit ${getStatusColor(issue.fields.status.name)}`}>
+                      {issue.fields.status.name}
+                    </div>
+                  </td>
+                  <td className="py-3 px-3 text-muted-foreground text-sm">
                     {issue.fields.assignee?.displayName || "Unassigned"}
                   </td>
-                  <td className="py-2 px-2 text-muted-foreground text-xs">
+                  <td className="py-3 px-3 text-muted-foreground text-xs">
                     {new Date(issue.fields.created).toLocaleDateString()}
                   </td>
                 </tr>

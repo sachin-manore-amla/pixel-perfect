@@ -366,6 +366,128 @@ app.post("/api/jira/search", requireJiraConfig, async (req: Request, res: Respon
   }
 });
 
+/**
+ * GET /api/jira/watchers/:issueKey
+ * Get watchers for a specific issue
+ */
+app.get("/api/jira/watchers/:issueKey", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const { issueKey } = req.params;
+    if (!issueKey) {
+      return res.status(400).json({ error: "Issue key is required" });
+    }
+
+    const response = await makeJiraRequest("GET", `/issue/${issueKey}/watchers`);
+    const data = await response.json();
+
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.error("[WATCHERS ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch watchers",
+    });
+  }
+});
+
+/**
+ * GET /api/jira/current-user
+ * Get current user information
+ */
+app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const response = await makeJiraRequest("GET", `/myself`);
+    const data = await response.json();
+
+    res.status(response.status).json(data);
+  } catch (error) {
+    console.error("[CURRENT USER ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch current user",
+    });
+  }
+});
+
+/**
+ * POST /api/jira/check-watching
+ * Check if current user is watching specific issues
+ */
+app.post("/api/jira/check-watching", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const { issueKeys } = req.body;
+    if (!issueKeys || !Array.isArray(issueKeys)) {
+      return res.status(400).json({ error: "issueKeys array is required" });
+    }
+
+    // Get current user
+    const userResponse = await makeJiraRequest("GET", `/myself`);
+    if (!userResponse.ok) {
+      throw new Error("Failed to get current user");
+    }
+    const currentUser = await userResponse.json();
+
+    // Check watchers for each issue
+    const watchingStatus: { [key: string]: boolean } = {};
+    
+    for (const issueKey of issueKeys) {
+      const watchersResponse = await makeJiraRequest("GET", `/issue/${issueKey}/watchers`);
+      if (watchersResponse.ok) {
+        const watchersData = await watchersResponse.json();
+        const watchers = watchersData.watchers || [];
+        // Check if current user is in watchers list
+        watchingStatus[issueKey] = watchers.some((w: any) => w.accountId === currentUser.accountId);
+      } else {
+        watchingStatus[issueKey] = false;
+      }
+    }
+
+    res.json(watchingStatus);
+  } catch (error) {
+    console.error("[CHECK WATCHING ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to check watching status",
+    });
+  }
+});
+
+/**
+ * POST /api/jira/watch-ticket
+ * Add current user as watcher to an issue
+ */
+app.post("/api/jira/watch-ticket", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const { issueKey } = req.body;
+    if (!issueKey) {
+      return res.status(400).json({ error: "Issue key is required" });
+    }
+
+    // Get current user
+    const userResponse = await makeJiraRequest("GET", `/myself`);
+    if (!userResponse.ok) {
+      throw new Error("Failed to get current user");
+    }
+    const currentUser = await userResponse.json();
+
+    // Add current user as watcher
+    const watchResponse = await makeJiraRequest("POST", `/issue/${issueKey}/watchers`, {
+      accountId: currentUser.accountId,
+    });
+
+    if (watchResponse.ok) {
+      res.json({ success: true, message: `Now watching ${issueKey}` });
+    } else {
+      const errorData = await watchResponse.text();
+      res.status(watchResponse.status).json({ 
+        error: `Failed to watch ticket: ${errorData}` 
+      });
+    }
+  } catch (error) {
+    console.error("[WATCH TICKET ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to watch ticket",
+    });
+  }
+});
+
 // Health check
 app.get("/api/health", (req: Request, res: Response) => {
   res.json({ status: "ok" });
