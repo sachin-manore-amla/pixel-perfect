@@ -42,16 +42,10 @@ export function StatsBar() {
         const jql = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
         const response = await search<SearchResponse>(jql, {
           maxResults: 100, // Fetch actual issues for reference
-        });
-        console.log("P1 Search Response:", response);
-        console.log("P1 Search Response Type:", typeof response);
-        console.log("P1 Total Count:", response?.total);
+        });       
         setP1Total(response?.issues.length ?? 0);
       } catch (error) {
         console.error("Failed to fetch P1 count from Jira:", error);
-        // Fallback to mock data if Jira API fails
-        const mockP1 = mockTickets.filter((t) => t.priority === "P1");
-        setP1Total(mockP1.length);
       } finally {
         setIsLoading(false);
       }
