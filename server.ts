@@ -416,6 +416,40 @@ app.get("/api/jira/watchers/:issueKey", requireJiraConfig, async (req: Request, 
 });
 
 /**
+ * GET /api/jira/issue/:issueKey/comment
+ * Get comments for a specific issue
+ */
+app.get("/api/jira/issue/:issueKey/comment", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const { issueKey } = req.params;
+    
+    if (!issueKey) {
+      return res.status(400).json({ error: "Issue key is required" });
+    }
+
+    console.log(`[COMMENTS] Fetching comments for ${issueKey}`);
+
+    const response = await makeJiraRequest("GET", `/issue/${issueKey}?fields=comment`);
+    
+    if (!response.ok) {
+      throw new Error(`Jira API returned ${response.status}`);
+    }
+
+    const data = await response.json();
+    const comments = data.fields?.comment || { comments: [] };
+    
+    console.log(`[COMMENTS] Found ${comments.comments?.length || 0} comments for ${issueKey}`);
+
+    res.status(200).json(comments);
+  } catch (error) {
+    console.error("[COMMENTS ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch comments",
+    });
+  }
+});
+
+/**
  * GET /api/jira/current-user
  * Get current user information
  */
@@ -563,6 +597,485 @@ app.post("/api/jira/watch-ticket", requireJiraConfig, async (req: Request, res: 
   }
 });
 
+// ─── Comment Sync Feature ────────────────────────────────────────────────────
+
+interface SyncRecord {
+  id: string;
+  sourceKey: string;
+  targetKey: string;
+  direction: "to-zlmc" | "to-z10";
+  commentId: string;
+  originalComment: string;
+  transformedComment: string;
+  author: string;
+  timestamp: string;
+  status: "success" | "failed";
+  error?: string;
+}
+
+const syncHistory: SyncRecord[] = [];
+
+/** Fast dedup lookup — key: "sourceKey::commentId" */
+const syncedCommentIds = new Set<string>();
+
+/** Register a record and update the dedup set */
+function registerSyncRecord(record: SyncRecord) {
+  syncHistory.unshift(record);
+  if (record.status === "success" && record.commentId) {
+    syncedCommentIds.add(`${record.sourceKey}::${record.commentId}`);
+  }
+  if (syncHistory.length > 200) syncHistory.pop();
+}
+
+/** Check if a specific comment has already been successfully synced */
+function isAlreadySynced(sourceKey: string, commentId: string): boolean {
+  return syncedCommentIds.has(`${sourceKey}::${commentId}`);
+}
+
+/** Extract plain text from Jira ADF (Atlassian Document Format) or plain string */
+function extractADFText(body: unknown): string {
+  if (typeof body === "string") return body;
+  // Also handle case where body is already serialised as JSON string
+  if (typeof body === "object" && body !== null) {
+    const adf = body as { content?: unknown[]; text?: string };
+    // Flat text field (some Jira versions)
+    if (typeof adf.text === "string") return adf.text;
+    if (!adf.content) {
+      // Last resort: stringify and search
+      return JSON.stringify(body);
+    }
+    const texts: string[] = [];
+    const walk = (nodes: unknown[]) => {
+      for (const node of nodes as Array<{ type?: string; text?: string; content?: unknown[] }>) {
+        if (node.type === "text" && node.text) texts.push(node.text);
+        if (node.content) walk(node.content);
+      }
+    };
+    walk(adf.content);
+    // Join without separator — preserves hashtags like #updateforz10 that may span zero boundaries
+    return texts.join("");
+  }
+  return String(body);
+}
+
+/** Use OpenAI to rewrite a comment for the target audience */
+async function transformCommentWithAI(
+  commentBody: string,
+  direction: "to-zlmc" | "to-z10",
+  ticketSummary: string
+): Promise<string> {
+  const openaiApiKey =
+    process.env.OPENAI_API_KEY || process.env.REACT_APP_OPENAI_API_KEY;
+
+  // Clean up hashtag regardless
+  const cleaned = commentBody
+    .replace(/#updateforzlmc/gi, "")
+    .replace(/#updateforz10/gi, "")
+    .trim();
+
+  if (!openaiApiKey || openaiApiKey.startsWith("sk-test")) {
+    // Fallback: return cleaned comment with a sync note
+    const note =
+      direction === "to-zlmc"
+        ? "\n\n[Synced from internal Z10 ticket]"
+        : "\n\n[Synced from client ZLMC ticket]";
+    return cleaned + note;
+  }
+
+  const systemPrompt =
+    direction === "to-zlmc"
+      ? `You are helping sync internal engineering comments to a client-facing Jira board (ZLMC).
+Rewrite the comment below to be professional, clear, and client-friendly.
+Rules:
+- Remove internal jargon, team names, internal tool references, and developer-only details.
+- Focus on: what was done, current status, and any action needed from the client.
+- Do NOT include the hashtag #updateforzlmc in the output.
+- Write in a professional, reassuring tone.
+- Keep it concise (max 3–4 sentences unless the original requires more detail).`
+      : `You are helping sync a client comment from ZLMC to an internal engineering Jira board (Z10).
+Rewrite the comment below to be useful for the internal engineering team.
+Rules:
+- Preserve all client-reported details and reproduction steps.
+- Prefix with: "[Synced from ZLMC client ticket]"
+- Do NOT include the hashtag #updateforz10 in the output.
+- Keep it factual and actionable for engineers.`;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-3.5-turbo",
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: `Ticket summary: ${ticketSummary}\n\nComment:\n${cleaned}`,
+          },
+        ],
+        max_tokens: 500,
+        temperature: 0.3,
+      }),
+    });
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    return data.choices?.[0]?.message?.content?.trim() || cleaned;
+  } catch (err) {
+    console.error("[AI TRANSFORM ERROR]", err);
+    return cleaned;
+  }
+}
+
+/**
+ * Core sync logic — shared between single and bulk sync endpoints.
+ */
+async function internalSyncComment(
+  issueKey: string,
+  commentBody: string,
+  commentId: string,
+  author: string
+): Promise<SyncRecord> {
+  const isToZLMC = /#updateforzlmc/i.test(commentBody);
+  const direction: "to-zlmc" | "to-z10" = isToZLMC ? "to-zlmc" : "to-z10";
+
+  console.log(`[SYNC] Fetching issue ${issueKey} for linked tickets`);
+  const issueRes = await makeJiraRequest("GET", `/issue/${issueKey}?fields=summary,issuelinks`);
+  if (!issueRes.ok) throw new Error(`Failed to fetch issue ${issueKey} from Jira (${issueRes.status})`);
+  const issueData = await issueRes.json();
+  const ticketSummary: string = issueData.fields?.summary || "";
+
+  const links: Array<{
+    outwardIssue?: { key: string };
+    inwardIssue?: { key: string };
+  }> = issueData.fields?.issuelinks || [];
+
+  let linkedKey: string | null = null;
+  for (const link of links) {
+    const candidate = link.outwardIssue?.key || link.inwardIssue?.key;
+    if (!candidate) continue;
+    if (direction === "to-zlmc" && /^Z10LMC-/i.test(candidate)) { linkedKey = candidate; break; }
+    if (direction === "to-z10" && /^Z10-\d/i.test(candidate)) { linkedKey = candidate; break; }
+  }
+
+  if (!linkedKey) {
+    const target = direction === "to-zlmc" ? "ZLMC (Z10LMC-*)" : "Z10 (Z10-*)";
+    throw new Error(`No linked ${target} ticket found on ${issueKey}. Ensure tickets are linked in Jira.`);
+  }
+
+  console.log(`[SYNC] Transforming comment (${direction}) for linked ticket ${linkedKey}`);
+  const transformedComment = await transformCommentWithAI(commentBody, direction, ticketSummary);
+
+  const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, {
+    body: {
+      type: "doc",
+      version: 1,
+      content: [{ type: "paragraph", content: [{ type: "text", text: transformedComment }] }],
+    },
+  });
+  const postData = await postRes.json();
+
+  const record: SyncRecord = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    sourceKey: issueKey,
+    targetKey: linkedKey,
+    direction,
+    commentId,
+    originalComment: commentBody,
+    transformedComment,
+    author,
+    timestamp: new Date().toISOString(),
+    status: postRes.ok ? "success" : "failed",
+    error: postRes.ok ? undefined : JSON.stringify(postData),
+  };
+
+  registerSyncRecord(record);
+  console.log(`[SYNC] ${record.status.toUpperCase()} — ${issueKey} → ${linkedKey}`);
+  return record;
+}
+
+/**
+ * POST /api/jira/sync-comment
+ * Sync a single comment to its linked ticket.
+ */
+app.post(
+  "/api/jira/sync-comment",
+  requireJiraConfig,
+  async (req: Request, res: Response) => {
+    try {
+      const { issueKey, commentBody, commentId = "", author = "Unknown" } = req.body;
+
+      if (!issueKey || !commentBody) {
+        return res.status(400).json({ error: "issueKey and commentBody are required" });
+      }
+
+      const isToZLMC = /#updateforzlmc/i.test(commentBody);
+      const isToZ10 = /#updateforz10/i.test(commentBody);
+      if (!isToZLMC && !isToZ10) {
+        return res.status(400).json({ error: "No sync hashtag (#updateforzlmc or #updateforz10) found in comment" });
+      }
+
+      // Dedup by commentId
+      if (commentId && isAlreadySynced(issueKey, commentId)) {
+        return res.status(409).json({ error: "This comment has already been synced.", alreadySynced: true });
+      }
+
+      const record = await internalSyncComment(issueKey, commentBody, commentId, author);
+      res.json({ success: record.status === "success", targetKey: record.targetKey, transformedComment: record.transformedComment, record });
+    } catch (error) {
+      console.error("[SYNC COMMENT ERROR]", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Comment sync failed" });
+    }
+  }
+);
+
+/**
+ * POST /api/jira/sync-all
+ * Bulk-sync multiple pending comments in one request.
+ * Body: { comments: Array<{ issueKey, commentBody, commentId, author? }> }
+ */
+app.post(
+  "/api/jira/sync-all",
+  requireJiraConfig,
+  async (req: Request, res: Response) => {
+    try {
+      const { comments } = req.body;
+      if (!Array.isArray(comments) || comments.length === 0) {
+        return res.status(400).json({ error: "comments array is required" });
+      }
+
+      const results: Array<{
+        issueKey: string;
+        commentId: string;
+        status: string;
+        targetKey?: string;
+        error?: string;
+        record?: SyncRecord;
+      }> = [];
+
+      for (const c of comments) {
+        const { issueKey, commentBody, commentId = "", author = "Unknown" } = c;
+
+        if (commentId && isAlreadySynced(issueKey, commentId)) {
+          results.push({ issueKey, commentId, status: "skipped", error: "Already synced" });
+          continue;
+        }
+
+        try {
+          const record = await internalSyncComment(issueKey, commentBody, commentId, author);
+          results.push({ issueKey, commentId, status: record.status, targetKey: record.targetKey, record });
+        } catch (error) {
+          results.push({
+            issueKey,
+            commentId,
+            status: "failed",
+            error: error instanceof Error ? error.message : "Sync failed",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const skipped = results.filter((r) => r.status === "skipped").length;
+      const failed = results.filter((r) => r.status === "failed").length;
+
+      res.json({ results, summary: { total: comments.length, succeeded, skipped, failed } });
+    } catch (error) {
+      console.error("[SYNC ALL ERROR]", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Bulk sync failed" });
+    }
+  }
+);
+
+/**
+ * POST /api/jira/auto-discover
+ * JQL-scan both Z10 and Z10LMC projects for comments with sync hashtags.
+ * Body: { days?: number (default 7), maxIssues?: number (default 50) }
+ */
+app.post(
+  "/api/jira/auto-discover",
+  requireJiraConfig,
+  async (req: Request, res: Response) => {
+    try {
+      const { days = 7, maxIssues = 50 } = req.body || {};
+
+      if (!jiraConfig) return res.status(400).json({ error: "Jira not configured" });
+
+      const authHeader = `Basic ${Buffer.from(
+        `${jiraConfig.email}:${jiraConfig.apiToken}`
+      ).toString("base64")}`;
+
+      // JQL for both projects
+      const jqlQueries = [
+        `project = Z10 AND updated >= -${days}d ORDER BY updated DESC`,
+        `project = "Z10-LMC" AND updated >= -${days}d ORDER BY updated DESC`,
+      ];
+
+      const allIssueKeys: string[] = [];
+
+      for (const jql of jqlQueries) {
+        try {
+          const url = new URL(`${jiraConfig.instanceUrl}/rest/api/3/search/jql`);
+          url.searchParams.append("jql", jql);
+          url.searchParams.append("maxResults", String(maxIssues));
+          url.searchParams.append("fields", "key");
+
+          const searchRes = await fetch(url.toString(), {
+            method: "GET",
+            headers: { Authorization: authHeader, "Content-Type": "application/json" },
+          });
+
+          if (!searchRes.ok) {
+            console.warn(`[AUTO-DISCOVER] JQL failed for: ${jql}`);
+            continue;
+          }
+
+          const searchData = (await searchRes.json()) as { issues?: Array<{ key: string }> };
+          allIssueKeys.push(...(searchData.issues || []).map((i) => i.key));
+        } catch (e) {
+          console.error("[AUTO-DISCOVER] JQL error:", e);
+        }
+      }
+
+      console.log(`[AUTO-DISCOVER] Scanning ${allIssueKeys.length} tickets`);
+
+      const results: Array<{
+        issueKey: string;
+        commentId: string;
+        commentBody: string;
+        author: string;
+        created: string;
+        direction: "to-zlmc" | "to-z10";
+      }> = [];
+
+      for (const key of allIssueKeys) {
+        try {
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment`);
+          if (!commentsRes.ok) continue;
+          const data = await commentsRes.json();
+          const comments: Array<{
+            id: string;
+            body: unknown;
+            author?: { displayName?: string };
+            created: string;
+          }> = data.fields?.comment?.comments || [];
+
+          for (const c of comments) {
+            const text = extractADFText(c.body);
+            const isToZLMC = /#updateforzlmc/i.test(text);
+            const isToZ10 = /#updateforz10/i.test(text);
+            if (!isToZLMC && !isToZ10) continue;
+
+            // Skip already synced by commentId
+            if (isAlreadySynced(key, c.id)) continue;
+
+            results.push({
+              issueKey: key,
+              commentId: c.id,
+              commentBody: text,
+              author: c.author?.displayName || "Unknown",
+              created: c.created,
+              direction: isToZLMC ? "to-zlmc" : "to-z10",
+            });
+          }
+        } catch (e) {
+          console.error(`[AUTO-DISCOVER] Error scanning ${key}:`, e);
+        }
+      }
+
+      console.log(`[AUTO-DISCOVER] Found ${results.length} pending sync comments`);
+      res.json({ results, scanned: allIssueKeys.length });
+    } catch (error) {
+      console.error("[AUTO-DISCOVER ERROR]", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Auto-discover failed" });
+    }
+  }
+);
+
+/**
+ * POST /api/jira/poll-sync-comments
+ * Scan a specific list of issue keys for comments containing sync hashtags.
+ * Body: { issueKeys: string[] }
+ * No date filter — dedup by commentId prevents re-syncing.
+ */
+app.post(
+  "/api/jira/poll-sync-comments",
+  requireJiraConfig,
+  async (req: Request, res: Response) => {
+    try {
+      const { issueKeys } = req.body;
+      if (!Array.isArray(issueKeys) || issueKeys.length === 0) {
+        return res.status(400).json({ error: "issueKeys array is required" });
+      }
+
+      const results: Array<{
+        issueKey: string;
+        commentId: string;
+        commentBody: string;
+        author: string;
+        created: string;
+        direction: "to-zlmc" | "to-z10";
+      }> = [];
+
+      for (const key of issueKeys) {
+        try {
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment`);
+          if (!commentsRes.ok) continue;
+          const data = await commentsRes.json();
+          const comments: Array<{
+            id: string;
+            body: unknown;
+            author?: { displayName?: string };
+            created: string;
+          }> = data.fields?.comment?.comments || [];
+
+          for (const c of comments) {
+            const text = extractADFText(c.body);
+            const isToZLMC = /#updateforzlmc/i.test(text);
+            const isToZ10 = /#updateforz10/i.test(text);
+            console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | toZLMC=${isToZLMC} toZ10=${isToZ10}`);
+            if (!isToZLMC && !isToZ10) continue;
+
+            // Skip already synced by commentId
+            if (isAlreadySynced(key, c.id)) {
+              console.log(`[POLL] Skipping ${key}::${c.id} — already synced`);
+              continue;
+            }
+
+            results.push({
+              issueKey: key,
+              commentId: c.id,
+              commentBody: text,
+              author: c.author?.displayName || "Unknown",
+              created: c.created,
+              direction: isToZLMC ? "to-zlmc" : "to-z10",
+            });
+          }
+        } catch (e) {
+          console.error(`[POLL] Error scanning ${key}:`, e);
+        }
+      }
+
+      res.json({ results, scanned: issueKeys.length });
+    } catch (error) {
+      console.error("[POLL SYNC ERROR]", error);
+      res.status(500).json({ error: error instanceof Error ? error.message : "Poll failed" });
+    }
+  }
+);
+
+/**
+ * GET /api/jira/sync-history
+ * Return the in-memory sync history.
+ */
+app.get("/api/jira/sync-history", requireJiraConfig, (req: Request, res: Response) => {
+  res.json({ history: syncHistory, total: syncHistory.length });
+});
+
+// ─── Health check ─────────────────────────────────────────────────────────────
 // Health check
 app.get("/api/health", (req: Request, res: Response) => {
   res.json({ status: "ok" });
