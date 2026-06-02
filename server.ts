@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
+import fs from "fs";
 
 // Load environment variables from .env.local first, then .env
 dotenv.config({ path: path.join(process.cwd(), ".env.local") });
@@ -613,18 +614,63 @@ interface SyncRecord {
   error?: string;
 }
 
-const syncHistory: SyncRecord[] = [];
+// ─── Persistent sync state ───────────────────────────────────────────────────
+const SYNC_STATE_FILE = path.join(process.cwd(), ".sync-state.json");
 
-/** Fast dedup lookup — key: "sourceKey::commentId" */
-const syncedCommentIds = new Set<string>();
+interface SyncState {
+  syncedIds: string[];     // "sourceKey::commentId" — secondary dedup
+  history: SyncRecord[];
+  lastSyncedAt: string | null; // ISO — only show comments created AFTER this
+}
 
-/** Register a record and update the dedup set */
+function loadSyncState(): SyncState {
+  try {
+    if (fs.existsSync(SYNC_STATE_FILE)) {
+      const raw = fs.readFileSync(SYNC_STATE_FILE, "utf-8");
+      const parsed = JSON.parse(raw) as SyncState;
+      console.log(`[SYNC STATE] Loaded ${parsed.syncedIds?.length ?? 0} synced IDs, lastSyncedAt=${parsed.lastSyncedAt}`);
+      return {
+        syncedIds: parsed.syncedIds || [],
+        history: parsed.history || [],
+        lastSyncedAt: parsed.lastSyncedAt || null,
+      };
+    }
+  } catch (e) {
+    console.warn("[SYNC STATE] Failed to load sync state, starting fresh:", e);
+  }
+  console.log("[SYNC STATE] First run — no prior sync history");
+  return { syncedIds: [], history: [], lastSyncedAt: null };
+}
+
+function saveSyncState() {
+  try {
+    const state: SyncState = {
+      syncedIds: Array.from(syncedCommentIds),
+      history: syncHistory,
+      lastSyncedAt,
+    };
+    fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("[SYNC STATE] Failed to save sync state:", e);
+  }
+}
+
+// Bootstrap from disk
+const _initialState = loadSyncState();
+const syncHistory: SyncRecord[] = _initialState.history;
+const syncedCommentIds = new Set<string>(_initialState.syncedIds);
+let lastSyncedAt: string | null = _initialState.lastSyncedAt;
+
+/** Register a record, update dedup + lastSyncedAt to now, and persist to disk */
 function registerSyncRecord(record: SyncRecord) {
   syncHistory.unshift(record);
   if (record.status === "success" && record.commentId) {
     syncedCommentIds.add(`${record.sourceKey}::${record.commentId}`);
+    // Advance the cutoff to the moment this sync ran
+    lastSyncedAt = new Date().toISOString();
   }
-  if (syncHistory.length > 200) syncHistory.pop();
+  if (syncHistory.length > 500) syncHistory.pop();
+  saveSyncState();
 }
 
 /** Check if a specific comment has already been successfully synced */
@@ -770,11 +816,28 @@ async function internalSyncComment(
   console.log(`[SYNC] Transforming comment (${direction}) for linked ticket ${linkedKey}`);
   const transformedComment = await transformCommentWithAI(commentBody, direction, ticketSummary);
 
+  const attribution =
+    direction === "to-zlmc"
+      ? `\n\n— Synced from internal ${issueKey} (Z10)`
+      : `\n\n— Synced from client ${issueKey} (ZLMC)`;
+
   const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, {
     body: {
       type: "doc",
       version: 1,
-      content: [{ type: "paragraph", content: [{ type: "text", text: transformedComment }] }],
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: transformedComment }] },
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: attribution.trim(),
+              marks: [{ type: "em" }],
+            },
+          ],
+        },
+      ],
     },
   });
   const postData = await postRes.json();
@@ -891,16 +954,35 @@ app.post(
 );
 
 /**
+ * Run tasks with a max concurrency cap.
+ */
+async function runConcurrent<T>(
+  items: T[],
+  fn: (item: T) => Promise<void>,
+  concurrency = 10
+): Promise<void> {
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const item = items[idx++];
+      try { await fn(item); } catch { /* individual errors handled inside fn */ }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+}
+
+/**
  * POST /api/jira/auto-discover
- * JQL-scan both Z10 and Z10LMC projects for comments with sync hashtags.
- * Body: { days?: number (default 7), maxIssues?: number (default 50) }
+ * JQL-scan both Z10 and Z10LMC for comments with sync hashtags.
+ * Optimized: smart JQL window based on lastSyncedAt + parallel comment fetching.
+ * Body: { days?: number (default 1), maxIssues?: number (default 200) }
  */
 app.post(
   "/api/jira/auto-discover",
   requireJiraConfig,
   async (req: Request, res: Response) => {
     try {
-      const { days = 7, maxIssues = 50 } = req.body || {};
+      const { days = 1, maxIssues = 200 } = req.body || {};
 
       if (!jiraConfig) return res.status(400).json({ error: "Jira not configured" });
 
@@ -908,39 +990,52 @@ app.post(
         `${jiraConfig.email}:${jiraConfig.apiToken}`
       ).toString("base64")}`;
 
-      // JQL for both projects
-      const jqlQueries = [
-        `project = Z10 AND updated >= -${days}d ORDER BY updated DESC`,
-        `project = "Z10-LMC" AND updated >= -${days}d ORDER BY updated DESC`,
-      ];
-
-      const allIssueKeys: string[] = [];
-
-      for (const jql of jqlQueries) {
-        try {
-          const url = new URL(`${jiraConfig.instanceUrl}/rest/api/3/search/jql`);
-          url.searchParams.append("jql", jql);
-          url.searchParams.append("maxResults", String(maxIssues));
-          url.searchParams.append("fields", "key");
-
-          const searchRes = await fetch(url.toString(), {
-            method: "GET",
-            headers: { Authorization: authHeader, "Content-Type": "application/json" },
-          });
-
-          if (!searchRes.ok) {
-            console.warn(`[AUTO-DISCOVER] JQL failed for: ${jql}`);
-            continue;
-          }
-
-          const searchData = (await searchRes.json()) as { issues?: Array<{ key: string }> };
-          allIssueKeys.push(...(searchData.issues || []).map((i) => i.key));
-        } catch (e) {
-          console.error("[AUTO-DISCOVER] JQL error:", e);
-        }
+      // Compute JQL window: use lastSyncedAt for tight filtering when available,
+      // otherwise fall back to the `days` param.
+      let updatedFilter: string;
+      if (lastSyncedAt) {
+        const msSince = Date.now() - new Date(lastSyncedAt).getTime();
+        const daysSince = Math.ceil(msSince / 86_400_000) + 1; // +1 buffer
+        updatedFilter = `-${Math.min(daysSince, days)}d`;
+      } else {
+        updatedFilter = `-${days}d`;
       }
 
-      console.log(`[AUTO-DISCOVER] Scanning ${allIssueKeys.length} tickets`);
+      const jqlQueries = [
+        `project = Z10 AND updated >= "${updatedFilter}" ORDER BY updated DESC`,
+        `project = Z10LMC AND updated >= "${updatedFilter}" ORDER BY updated DESC`,
+      ];
+
+      // Fetch both project ticket lists in parallel
+      const allIssueKeys: string[] = [];
+      await Promise.allSettled(
+        jqlQueries.map(async (jql) => {
+          try {
+            const url = new URL(`${jiraConfig!.instanceUrl}/rest/api/3/search/jql`);
+            url.searchParams.append("jql", jql);
+            url.searchParams.append("maxResults", String(maxIssues));
+            url.searchParams.append("fields", "key");
+
+            const searchRes = await fetch(url.toString(), {
+              method: "GET",
+              headers: { Authorization: authHeader, "Content-Type": "application/json" },
+            });
+            if (!searchRes.ok) {
+              console.warn(`[AUTO-DISCOVER] JQL failed: ${jql}`);
+              return;
+            }
+            const data = (await searchRes.json()) as { issues?: Array<{ key: string }> };
+            const keys = (data.issues || []).map((i) => i.key);
+            allIssueKeys.push(...keys);
+          } catch (e) {
+            console.error("[AUTO-DISCOVER] JQL error:", e);
+          }
+        })
+      );
+
+      // Deduplicate keys (a ticket could appear in both queries theoretically)
+      const uniqueKeys = [...new Set(allIssueKeys)];
+      console.log(`[AUTO-DISCOVER] Scanning ${uniqueKeys.length} tickets (window: ${updatedFilter})`);
 
       const results: Array<{
         issueKey: string;
@@ -951,10 +1046,12 @@ app.post(
         direction: "to-zlmc" | "to-z10";
       }> = [];
 
-      for (const key of allIssueKeys) {
-        try {
+      // Fetch comments for all tickets in parallel (10 at a time)
+      await runConcurrent(
+        uniqueKeys,
+        async (key) => {
           const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment`);
-          if (!commentsRes.ok) continue;
+          if (!commentsRes.ok) return;
           const data = await commentsRes.json();
           const comments: Array<{
             id: string;
@@ -969,7 +1066,10 @@ app.post(
             const isToZ10 = /#updateforz10/i.test(text);
             if (!isToZLMC && !isToZ10) continue;
 
-            // Skip already synced by commentId
+            // Only show comments added after last sync
+            if (lastSyncedAt && new Date(c.created) <= new Date(lastSyncedAt)) continue;
+
+            // Secondary dedup by commentId
             if (isAlreadySynced(key, c.id)) continue;
 
             results.push({
@@ -981,13 +1081,12 @@ app.post(
               direction: isToZLMC ? "to-zlmc" : "to-z10",
             });
           }
-        } catch (e) {
-          console.error(`[AUTO-DISCOVER] Error scanning ${key}:`, e);
-        }
-      }
+        },
+        10
+      );
 
       console.log(`[AUTO-DISCOVER] Found ${results.length} pending sync comments`);
-      res.json({ results, scanned: allIssueKeys.length });
+      res.json({ results, scanned: uniqueKeys.length });
     } catch (error) {
       console.error("[AUTO-DISCOVER ERROR]", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Auto-discover failed" });
@@ -1039,7 +1138,13 @@ app.post(
             console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | toZLMC=${isToZLMC} toZ10=${isToZ10}`);
             if (!isToZLMC && !isToZ10) continue;
 
-            // Skip already synced by commentId
+            // Only show comments created after the last sync
+            if (lastSyncedAt && new Date(c.created) <= new Date(lastSyncedAt)) {
+              console.log(`[POLL] Skipping ${key}::${c.id} — created before lastSyncedAt`);
+              continue;
+            }
+
+            // Secondary dedup: skip if already in synced set
             if (isAlreadySynced(key, c.id)) {
               console.log(`[POLL] Skipping ${key}::${c.id} — already synced`);
               continue;
