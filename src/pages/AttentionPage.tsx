@@ -1,57 +1,42 @@
 import { useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
-import { Eye, MessageCircle, Clock, Loader2, ChevronDown, ChevronUp } from "lucide-react";
+import { Eye, MessageCircle, Clock, Loader2, ChevronDown, ChevronUp, AlertTriangle, User, ChevronLeft, ChevronRight } from "lucide-react";
 import { useTicketsWithAnalysis } from "@/hooks/useTicketsWithAnalysis";
 import { useRecentActivity } from "@/hooks/useRecentActivity";
+import { useUnattendedTickets } from "@/hooks/useUnattendedTickets";
+import { useJiraConfig } from "@/hooks/use-jira-config";
+import { useCurrentJiraUser } from "@/hooks/useCurrentJiraUser";
 import { CommentsTimeline } from "@/components/CommentsTimeline";
 import { NewActivityTable } from "@/components/NewActivityTable";
  
 const AttentionPage = () => {
   const [daysWindow, setDaysWindow] = useState<1 | 15 | 30>(30);
   const [expandedTicket, setExpandedTicket] = useState<string | null>(null);
+  const [p1Page, setP1Page] = useState(1);
+  const P1_PAGE_SIZE = 5;
+  const [unattendedPage, setUnattendedPage] = useState(1);
+  const UNATTENDED_PAGE_SIZE = 10;
+  const [visibleNewActivityCount, setVisibleNewActivityCount] = useState(0);
+  const { config: jiraConfig } = useJiraConfig();
+  const { data: currentJiraUser } = useCurrentJiraUser();
+  const currentUserDisplayName = currentJiraUser?.displayName;
   const { data: analysisData, isLoading, error } = useTicketsWithAnalysis(daysWindow);
-  const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1);
+  const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1, currentUserDisplayName);
+  const { data: unattendedData, isLoading: unattendedLoading } = useUnattendedTickets(daysWindow * 24);
   const attentionRequired = analysisData?.attentionRequired || [];
   const attentionCount = analysisData?.attentionCount || 0;
+  const p1TotalPages = Math.ceil(attentionRequired.length / P1_PAGE_SIZE);
+  const p1PagedTickets = attentionRequired.slice((p1Page - 1) * P1_PAGE_SIZE, p1Page * P1_PAGE_SIZE);
   const recentActivity = recentActivityData || [];
+  const unattendedTickets = unattendedData || [];
+  const unattendedTotalPages = Math.ceil(unattendedTickets.length / UNATTENDED_PAGE_SIZE);
+  const unattendedPagedTickets = unattendedTickets.slice((unattendedPage - 1) * UNATTENDED_PAGE_SIZE, unattendedPage * UNATTENDED_PAGE_SIZE);
  
   const getWindowLabel = () => {
     if (daysWindow === 1) return "Last 24 Hours";
     if (daysWindow === 15) return "Last 15 Days";
     return "Last 30 Days";
   };
- 
-  // Sample data for New Activity Since Your Last Comment
-  const dummyNewActivity = [
-    {
-      ticketKey: "Z10LMC-3002",
-      summary: "Database connection pool exhaustion",
-      lastComment: { author: "Dnyanada Moharir", text: "Pool size increased, monitoring" },
-      assignee: "Mukul Chaudhari",
-      commentedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      ticketKey: "Z10LMC-3004",
-      summary: "CDN cache invalidation not propagating",
-      lastComment: { author: "Prajakta Dhote", text: "Fix deployed to staging, needs QA verification" },
-      assignee: "Mukul Chaudhari",
-      commentedAt: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      ticketKey: "Z10LMC-3005",
-      summary: "Memory leak in notification service",
-      lastComment: { author: "Hardik Sanjay Khedkar", text: "Heap dump analysis in progress" },
-      assignee: "Mukul Chaudhari",
-      commentedAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
-    },
-    {
-      ticketKey: "Z10LMC-3007",
-      summary: "Rate limiter misconfigured for partner API",
-      lastComment: { author: "Akash Kulkarni", text: "Rate limit adjusted, partner team to verify" },
-      assignee: "Mukul Chaudhari",
-      commentedAt: new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString(),
-    },
-  ];
  
   if (error) {
     return (
@@ -70,12 +55,13 @@ const AttentionPage = () => {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-foreground">Attention Tracker</h1>
+            <p className="text-sm text-muted-foreground mt-1">Monitor P1 tickets that need your immediate action</p>
           </div>
          
           {/* Time Window Filter */}
           <div className="flex gap-2">
             <button
-              onClick={() => setDaysWindow(1)}
+              onClick={() => { setDaysWindow(1); setP1Page(1); setUnattendedPage(1); }}
               className={`px-4 py-2 rounded font-medium text-sm transition-colors ${
                 daysWindow === 1
                   ? "bg-primary text-primary-foreground"
@@ -85,7 +71,7 @@ const AttentionPage = () => {
               24 Hours
             </button>
             <button
-              onClick={() => setDaysWindow(15)}
+              onClick={() => { setDaysWindow(15); setP1Page(1); setUnattendedPage(1); }}
               className={`px-4 py-2 rounded font-medium text-sm transition-colors ${
                 daysWindow === 15
                   ? "bg-primary text-primary-foreground"
@@ -95,7 +81,7 @@ const AttentionPage = () => {
               15 Days
             </button>
             <button
-              onClick={() => setDaysWindow(30)}
+              onClick={() => { setDaysWindow(30); setP1Page(1); setUnattendedPage(1); }}
               className={`px-4 py-2 rounded font-medium text-sm transition-colors ${
                 daysWindow === 30
                   ? "bg-primary text-primary-foreground"
@@ -107,6 +93,31 @@ const AttentionPage = () => {
           </div>
         </div>
  
+        {/* Section Guide */}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="flex gap-3 p-3 rounded-lg bg-info/5 border border-info/20">
+            <div className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-full bg-info/15 flex items-center justify-center text-info font-bold text-sm">1</div>
+            <div>
+              <p className="text-xs font-semibold text-foreground">P1 Tickets Needing Attention</p>
+              <p className="text-xs text-muted-foreground mt-0.5">AI-analyzed P1 tickets where comments suggest a blocker, unanswered question, or escalation is needed.</p>
+            </div>
+          </div>
+          <div className="flex gap-3 p-3 rounded-lg bg-warning/5 border border-warning/20">
+            <div className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-full bg-warning/15 flex items-center justify-center text-warning font-bold text-sm">2</div>
+            <div>
+              <p className="text-xs font-semibold text-foreground">New Activity Since Your Last Comment</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Tickets where someone else commented after your last reply — you may need to follow up.</p>
+            </div>
+          </div>
+          <div className="flex gap-3 p-3 rounded-lg bg-critical/5 border border-critical/20">
+            <div className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-full bg-critical/15 flex items-center justify-center text-critical font-bold text-sm">3</div>
+            <div>
+              <p className="text-xs font-semibold text-foreground">P1 Unattended Tickets</p>
+              <p className="text-xs text-muted-foreground mt-0.5">Active P1 tickets where no one has commented or changed status within the selected time window.</p>
+            </div>
+          </div>
+        </div>
+
         {/* Stats Cards */}
         <div className="grid grid-cols-3 gap-4">
           <div className="rounded bg-card border border-border border-l-4 border-l-info p-4 animate-slide-in">
@@ -120,21 +131,31 @@ const AttentionPage = () => {
             </div>
             <p className="text-xs text-muted-foreground mt-2">{getWindowLabel()}</p>
           </div>
- 
+
+          <div className="rounded bg-card border border-border border-l-4 border-l-warning p-4 animate-slide-in">
+            <div className="flex items-center gap-2">
+              <Eye className="h-4 w-4 text-muted-foreground" />
+              <span className="text-xs text-muted-foreground uppercase tracking-wide">New Activity</span>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              {recentActivityLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
+              <p className="text-2xl font-bold text-foreground">{visibleNewActivityCount}</p>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">Since your last comment</p>
+          </div>
+
           <div className="rounded bg-card border border-border border-l-4 border-l-critical p-4 animate-slide-in">
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs text-muted-foreground uppercase tracking-wide">Unattended</span>
             </div>
-            <p className="text-2xl font-bold text-foreground mt-1">0</p>
-          </div>
- 
-          <div className="rounded bg-card border border-border border-l-4 border-l-primary p-4 animate-slide-in">
-            <div className="flex items-center gap-2">
-              <Eye className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground uppercase tracking-wide">Watching</span>
+            <div className="flex items-center gap-2 mt-1">
+              {unattendedLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
+              <p className="text-2xl font-bold text-foreground">{unattendedTickets.length}</p>
             </div>
-            <p className="text-2xl font-bold text-foreground mt-1">0</p>
+            <p className="text-xs text-muted-foreground mt-2">
+              No response in {daysWindow === 1 ? "24h+" : daysWindow === 15 ? "15 days" : "30 days"}
+            </p>
           </div>
         </div>
  
@@ -151,7 +172,7 @@ const AttentionPage = () => {
             <p className="text-sm text-muted-foreground">No tickets requiring attention at this time.</p>
           ) : (
             <div className="space-y-3">
-              {attentionRequired.map((ticket) => (
+              {p1PagedTickets.map((ticket) => (
                 <div key={ticket.ticketKey} className="border border-border rounded overflow-hidden bg-muted/30 hover:bg-muted/50 transition-colors">
                   <button
                     onClick={() =>
@@ -214,26 +235,189 @@ const AttentionPage = () => {
                   )}
                 </div>
               ))}
+              {p1TotalPages > 1 && (
+                <div className="flex items-center justify-between pt-3 border-t border-border">
+                  <span className="text-xs text-muted-foreground">
+                    Showing {(p1Page - 1) * P1_PAGE_SIZE + 1}–{Math.min(p1Page * P1_PAGE_SIZE, attentionRequired.length)} of {attentionRequired.length} tickets
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setP1Page((p) => Math.max(1, p - 1))}
+                      disabled={p1Page === 1}
+                      className="p-1.5 rounded border border-border hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    {Array.from({ length: p1TotalPages }, (_, i) => i + 1).map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => setP1Page(page)}
+                        className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
+                          page === p1Page
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "border-border hover:bg-muted"
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setP1Page((p) => Math.min(p1TotalPages, p + 1))}
+                      disabled={p1Page === p1TotalPages}
+                      className="p-1.5 rounded border border-border hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
  
         {/* New Activity Since Your Last Comment Section */}
         <div className="mt-8">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">New Activity Since Your Last Comment</h2>
-            <p className="text-sm text-muted-foreground mt-1">Recent activity from team members</p>
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">New Activity Since Your Last Comment</h2>
+              <p className="text-sm text-muted-foreground mt-1">
+                {currentUserDisplayName
+                  ? `Tickets where team replied after your last comment (${currentUserDisplayName})`
+                  : "Connecting to Jira to identify your comments..."}
+              </p>
+            </div>
+            {recentActivityLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
           </div>
-          <NewActivityTable items={dummyNewActivity} isLoading={false} />
+          {!recentActivityLoading && recentActivity.length === 0 ? (
+            <div className="rounded bg-card border border-border p-6 text-center">
+              <p className="text-sm text-muted-foreground">No new activity in the last 24 hours.</p>
+            </div>
+          ) : (
+            <NewActivityTable items={recentActivity} isLoading={recentActivityLoading} onVisibleCountChange={setVisibleNewActivityCount} />
+          )}
         </div>
  
         {/* P1 Unattended Tickets Section */}
         <div className="mt-8">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">P1 Unattended Tickets</h2>
-            <p className="text-sm text-muted-foreground mt-1">Recent P1 tickets with new comments</p>
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">P1 Unattended Tickets</h2>
+              <p className="text-sm text-muted-foreground mt-1">Active P1 tickets with no response in {getWindowLabel().toLowerCase()}</p>
+            </div>
+            {unattendedLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
           </div>
-          <NewActivityTable items={recentActivity} isLoading={recentActivityLoading} />
+
+          {unattendedLoading ? (
+            <div className="flex items-center gap-2 text-muted-foreground text-sm py-8">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading unattended tickets...
+            </div>
+          ) : unattendedTickets.length === 0 ? (
+            <div className="rounded bg-card border border-border p-6 text-center">
+              <p className="text-sm text-muted-foreground">No unattended tickets — all P1s have recent activity 🎉</p>
+            </div>
+          ) : (
+            <div className="rounded bg-card border border-border overflow-hidden">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-muted/50">
+                    <th className="text-left py-2.5 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Ticket</th>
+                    <th className="text-left py-2.5 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Summary</th>
+                    <th className="text-left py-2.5 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Assignee</th>
+                    <th className="text-left py-2.5 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
+                    <th className="text-left py-2.5 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Last Activity</th>
+                    <th className="text-right py-2.5 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Silent For</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {unattendedPagedTickets.map((t) => (
+                    <tr key={t.ticketKey} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                      <td className="py-3 px-4">
+                        <a
+                          href={`https://amla.atlassian.net/browse/${t.ticketKey}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-primary font-semibold hover:underline"
+                        >
+                          {t.ticketKey}
+                        </a>
+                      </td>
+                      <td className="py-3 px-4 text-foreground max-w-[250px] truncate">{t.summary}</td>
+                      <td className="py-3 px-4">
+                        {t.assignee === "Unassigned" ? (
+                          <span className="flex items-center gap-1 text-critical font-medium">
+                            <User className="h-3 w-3" /> Unassigned
+                          </span>
+                        ) : (
+                          <span className="text-foreground">{t.assignee}</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-muted-foreground">{t.status}</td>
+                      <td className="py-3 px-4">
+                        {t.lastActivityType === "none" ? (
+                          <span className="text-critical italic">No activity yet</span>
+                        ) : t.lastActivityType === "status_change" ? (
+                          <span className="flex items-center gap-1 text-warning">
+                            <AlertTriangle className="h-3 w-3" /> Status changed
+                          </span>
+                        ) : t.reason === "no_comments" ? (
+                          <span className="text-critical italic">No comments yet</span>
+                        ) : (
+                          <span className="text-muted-foreground">{t.lastCommentBy}</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        <span className={`font-mono font-bold ${
+                          t.silentHours >= 72 ? "text-critical" :
+                          t.silentHours >= 48 ? "text-warning" :
+                          "text-muted-foreground"
+                        }`}>
+                          {t.silentHours >= 24
+                            ? `${Math.floor(t.silentHours / 24)}d ${t.silentHours % 24}h`
+                            : `${t.silentHours}h`}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {unattendedTotalPages > 1 && (
+                <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-muted/20">
+                  <span className="text-xs text-muted-foreground">
+                    Showing {(unattendedPage - 1) * UNATTENDED_PAGE_SIZE + 1}–{Math.min(unattendedPage * UNATTENDED_PAGE_SIZE, unattendedTickets.length)} of {unattendedTickets.length} tickets
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setUnattendedPage((p) => Math.max(1, p - 1))}
+                      disabled={unattendedPage === 1}
+                      className="p-1.5 rounded border border-border hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    {Array.from({ length: unattendedTotalPages }, (_, i) => i + 1).map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => setUnattendedPage(page)}
+                        className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors ${
+                          page === unattendedPage
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "border-border hover:bg-muted"
+                        }`}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setUnattendedPage((p) => Math.min(unattendedTotalPages, p + 1))}
+                      disabled={unattendedPage === unattendedTotalPages}
+                      className="p-1.5 rounded border border-border hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </DashboardLayout>

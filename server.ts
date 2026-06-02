@@ -1075,6 +1075,94 @@ app.get("/api/jira/sync-history", requireJiraConfig, (req: Request, res: Respons
   res.json({ history: syncHistory, total: syncHistory.length });
 });
 
+/**
+ * POST /api/ai/analyze-comments
+ * Use OpenAI (same key used for comment sync) to analyze Jira ticket comments
+ * and determine if manager attention is needed.
+ * Body: { ticketKey: string, ticketSummary: string, comments: Array<{ author: string, text: string }> }
+ */
+app.post("/api/ai/analyze-comments", async (req: Request, res: Response) => {
+  try {
+    const { ticketKey, ticketSummary, comments } = req.body;
+
+    const openaiApiKey = process.env.OPENAI_API_KEY || process.env.REACT_APP_OPENAI_API_KEY;
+    if (!openaiApiKey || openaiApiKey.startsWith("sk-test")) {
+      return res.status(400).json({ error: "OPENAI_API_KEY not configured" });
+    }
+
+    if (!comments || comments.length === 0) {
+      return res.json({ needsAttention: false, reason: "", priority: "LOW" });
+    }
+
+    // Send last 10 comments only to save tokens
+    const commentThread = comments
+      .slice(-10)
+      .map((c: { author: string; text: string }) => `[${c.author}]: ${c.text}`)
+      .join("\n");
+
+    const prompt = `You are analyzing a Jira P1 production support ticket to determine if a manager needs to take immediate action.
+
+Ticket: ${ticketKey}
+Summary: ${ticketSummary}
+
+Recent Comments:
+${commentThread}
+
+Analyze the conversation and determine:
+1. Does this ticket need manager/lead attention RIGHT NOW? (true/false)
+2. Priority level:
+   - HIGH: production down, customers blocked, deployment failed, no one responding
+   - MEDIUM: unanswered question >4h, waiting for approval, unclear ownership
+   - LOW: routine update, progress shared, no action needed
+3. One line reason (max 100 characters)
+
+Respond ONLY in this exact JSON format with no extra text:
+{"needsAttention": true, "priority": "HIGH", "reason": "Production is down with no response for 6 hours"}`;
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "gpt-3.5-turbo",
+        messages: [
+          { role: "system", content: "You are a Jira ticket triage assistant. Always respond with valid JSON only." },
+          { role: "user", content: prompt },
+        ],
+        max_tokens: 150,
+        temperature: 0.1,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error("[AI ANALYZE ERROR]", err);
+      return res.status(500).json({ error: "OpenAI API call failed", details: err });
+    }
+
+    const data = await response.json() as any;
+    const rawText: string = data?.choices?.[0]?.message?.content?.trim() || "";
+
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      console.warn("[AI ANALYZE] Could not parse response:", rawText);
+      return res.json({ needsAttention: false, reason: "AI analysis unavailable", priority: "LOW" });
+    }
+
+    const result = JSON.parse(jsonMatch[0]);
+    console.log(`[AI ANALYZE] ${ticketKey}: needsAttention=${result.needsAttention}, priority=${result.priority}`);
+    res.json(result);
+  } catch (error) {
+    console.error("[AI ANALYZE ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "AI analysis failed",
+    });
+  }
+});
+
+
 // ─── Health check ─────────────────────────────────────────────────────────────
 // Health check
 app.get("/api/health", (req: Request, res: Response) => {

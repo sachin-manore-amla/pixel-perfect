@@ -65,12 +65,8 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
     }
 
     const ticketsData = await ticketsResponse.json();
-    let tickets: JiraTicket[] = ticketsData.issues || [];
-    console.log(`[Tickets Service] Found ${tickets.length} P1 tickets total`);
-
-    // Filter for "Dev In Progress" status
-    tickets = tickets.filter((t) => t.fields.status.name === "Dev In Progress");
-    console.log(`[Tickets Service] Found ${tickets.length} P1 tickets with "Dev In Progress" status`);
+    const tickets: JiraTicket[] = ticketsData.issues || [];
+    console.log(`[Tickets Service] Found ${tickets.length} P1 tickets total (all active statuses)`);
 
     if (tickets.length === 0) {
       return {
@@ -165,8 +161,41 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
         );
       }
 
-      // Analyze for unanswered comments
-      const analysis = analyzeCommentsForUnanswered(comments);
+      // Analyze for attention using Gemini AI (with keyword fallback)
+      const commentsForAI = comments.map((c) => ({
+        author: c.author?.displayName || "Unknown",
+        text: extractCommentText(c.body).substring(0, 300),
+      }));
+
+      let analysis: AnalysisResult;
+      try {
+        const aiResponse = await fetch("http://localhost:3001/api/ai/analyze-comments", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ticketKey: ticket.key,
+            ticketSummary: ticket.fields.summary,
+            comments: commentsForAI,
+          }),
+        });
+
+        if (aiResponse.ok) {
+          const aiResult = await aiResponse.json();
+          analysis = {
+            needsAttention: aiResult.needsAttention === true,
+            reason: aiResult.reason || "",
+            priority: aiResult.priority || "LOW",
+          };
+          console.log(`[AI] ${ticket.key}: ${analysis.needsAttention ? "⚠️ Needs Attention" : "✅ OK"} — ${analysis.reason}`);
+        } else {
+          // OpenAI not configured or returned error — fallback to keyword analysis
+          console.log(`[AI] ${ticket.key}: OpenAI unavailable, using keyword fallback`);
+          analysis = analyzeCommentsForUnanswered(comments);
+        }
+      } catch {
+        console.log(`[AI] ${ticket.key}: OpenAI call failed, using keyword fallback`);
+        analysis = analyzeCommentsForUnanswered(comments);
+      }
       console.log(
         `[Tickets Service] ${ticket.key} - Needs Attention: ${analysis.needsAttention}, Reason: ${analysis.reason}`
       );
@@ -308,33 +337,49 @@ export interface NewActivity {
 }
 
 // Fetch recent P1 tickets with new activity
-export async function fetchRecentActivity(daysWindow: number = 1): Promise<NewActivity[]> {
+export async function fetchRecentActivity(daysWindow: number = 1, currentUserDisplayName?: string): Promise<NewActivity[]> {
   try {
     console.log(`[Tickets Service] Fetching recent activity from last ${daysWindow} days...`);
 
-    // Fetch P1 tickets - all active ones
+    // Fetch P1 tickets from Z10-LMC and Z10 projects using pagination
     const jql =
-      'project = Z10-LMC AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)';
+      '(project = Z10-LMC OR project = Z10) AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC';
 
-    const ticketsResponse = await fetch("http://localhost:3001/api/jira/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        jql,
-        maxResults: 50,
-        fields: ["summary", "assignee", "created", "updated"],
-      }),
-    });
+    const PAGE_SIZE = 100;
+    let startAt = 0;
+    let allTickets: JiraTicket[] = [];
+    let total = Infinity;
 
-    if (!ticketsResponse.ok) {
-      throw new Error(`Failed to fetch recent activity: ${ticketsResponse.statusText}`);
+    // Paginate through all results
+    while (startAt < total) {
+      const ticketsResponse = await fetch("http://localhost:3001/api/jira/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jql,
+          maxResults: PAGE_SIZE,
+          startAt,
+          fields: ["summary", "assignee", "created", "updated"],
+        }),
+      });
+
+      if (!ticketsResponse.ok) {
+        throw new Error(`Failed to fetch recent activity: ${ticketsResponse.statusText}`);
+      }
+
+      const ticketsData = await ticketsResponse.json();
+      const pageTickets: JiraTicket[] = ticketsData.issues || [];
+      total = ticketsData.total ?? pageTickets.length;
+      allTickets = allTickets.concat(pageTickets);
+      startAt += pageTickets.length;
+
+      console.log(`[Tickets Service] Fetched ${allTickets.length} / ${total} tickets...`);
+
+      if (pageTickets.length < PAGE_SIZE) break; // last page
     }
 
-    const ticketsData = await ticketsResponse.json();
-    const tickets: JiraTicket[] = ticketsData.issues || [];
-    console.log(`[Tickets Service] Found ${tickets.length} tickets with recent activity`);
+    const tickets = allTickets;
+    console.log(`[Tickets Service] Total tickets fetched: ${tickets.length}`);
 
     // Fetch comments for each ticket
     const recentActivity: NewActivity[] = [];
@@ -357,33 +402,71 @@ export async function fetchRecentActivity(daysWindow: number = 1): Promise<NewAc
           const commentData = await commentResponse.json();
           const comments: JiraComment[] = commentData.comments || [];
 
-          if (comments.length > 0) {
-            // Get the latest comment
+          if (comments.length === 0) continue;
+
+          // If currentUserEmail is provided, find MY last comment index
+          // then show only comments that came AFTER my last comment
+          let relevantComments = comments;
+
+          if (currentUserDisplayName) {
+            // Find the last comment made by current user — exact displayName match (case+trim insensitive)
+            let myLastCommentIndex = -1;
+            for (let i = comments.length - 1; i >= 0; i--) {
+              const authorName = comments[i].author?.displayName?.trim() || "";
+              if (authorName.toLowerCase() === currentUserDisplayName.trim().toLowerCase()) {
+                myLastCommentIndex = i;
+                break;
+              }
+            }
+
+            if (myLastCommentIndex === -1) {
+              // Current user has never commented on this ticket — skip
+              // (this section is only for tickets where YOU have been involved)
+              console.log(`[RecentActivity] ${ticket.key}: No comment by "${currentUserDisplayName}" — skipping`);
+              continue;
+            }
+
+            console.log(`[RecentActivity] ${ticket.key}: Found "${currentUserDisplayName}" at index ${myLastCommentIndex} of ${comments.length}`);
+
+            // Comments after my last comment
+            relevantComments = comments.slice(myLastCommentIndex + 1);
+
+            if (relevantComments.length === 0) {
+              console.log(`[RecentActivity] ${ticket.key}: No new comments after user's last comment — skipping`);
+              continue;
+            }
+
+            console.log(`[RecentActivity] ${ticket.key}: ${relevantComments.length} new comment(s) after user's last comment ✅`);
+          } else {
+            // No user context — fallback: show tickets with recent comments in last daysWindow
             const latestComment = comments[comments.length - 1];
             const commentDate = new Date(latestComment.updated);
-            
-            // Only include if comment is recent enough
-            if (commentDate >= cutoffDate) {
-              const commentText = extractCommentText(latestComment.body);
-              
-              // Skip tickets marked as "attended" or "acknowledged"
-              if (commentText.toLowerCase().includes("attended") || commentText.toLowerCase().includes("acknowledged")) {
-                console.log(`[Tickets Service] Skipping ${ticket.key}: Latest comment mentions "attended" or "acknowledged"`);
-                continue;
-              }
-
-              recentActivity.push({
-                ticketKey: ticket.key,
-                summary: ticket.fields.summary,
-                lastComment: {
-                  author: latestComment.author?.displayName || "Unknown",
-                  text: commentText.substring(0, 150),
-                },
-                assignee: ticket.fields.assignee?.displayName || "Unassigned",
-                commentedAt: latestComment.updated,
-              });
-            }
+            if (commentDate < cutoffDate) continue;
+            relevantComments = [latestComment];
           }
+
+          // Get the latest of the relevant comments
+          const latestRelevant = relevantComments[relevantComments.length - 1];
+          const commentText = extractCommentText(latestRelevant.body);
+
+          // Skip if it's marked attended/acknowledged
+          if (
+            commentText.toLowerCase().includes("attended") ||
+            commentText.toLowerCase().includes("acknowledged")
+          ) {
+            continue;
+          }
+
+          recentActivity.push({
+            ticketKey: ticket.key,
+            summary: ticket.fields.summary,
+            lastComment: {
+              author: latestRelevant.author?.displayName || "Unknown",
+              text: commentText.substring(0, 150),
+            },
+            assignee: ticket.fields.assignee?.displayName || "Unassigned",
+            commentedAt: latestRelevant.updated,
+          });
         }
       } catch (error) {
         console.warn(`[Tickets Service] Error fetching comments for ${ticket.key}:`, error);
@@ -397,6 +480,150 @@ export async function fetchRecentActivity(daysWindow: number = 1): Promise<NewAc
     return recentActivity;
   } catch (error) {
     console.error("[Tickets Service] Error fetching recent activity:", error);
+    throw error;
+  }
+}
+
+export interface UnattendedTicket {
+  ticketKey: string;
+  summary: string;
+  assignee: string;
+  status: string;
+  createdAt: string;
+  lastCommentAt: string | null;   // null = no comments ever
+  lastCommentBy: string | null;
+  statusUpdatedAt: string;        // last time ticket status/fields changed
+  silentHours: number;            // hours since last activity (comment OR status change)
+  reason: "no_comments" | "no_recent_response";
+  lastActivityType: "comment" | "status_change" | "none"; // what was the last activity
+}
+
+// Fetch P1 tickets that are truly unattended:
+//   - No comments at all, OR
+//   - Last comment is older than `thresholdHours` (default 24h)
+export async function fetchUnattendedTickets(thresholdHours: number = 24): Promise<UnattendedTicket[]> {
+  try {
+    console.log(`[Tickets Service] Fetching unattended P1 tickets (threshold: ${thresholdHours}h)...`);
+
+    // Z10-LMC only, pagination
+    const jql =
+      'project = Z10-LMC AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC';
+
+    const PAGE_SIZE = 100;
+    let startAt = 0;
+    let allTickets: JiraTicket[] = [];
+    let total = Infinity;
+
+    while (startAt < total) {
+      const ticketsResponse = await fetch("http://localhost:3001/api/jira/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jql,
+          maxResults: PAGE_SIZE,
+          startAt,
+          fields: ["summary", "status", "assignee", "created", "updated"],
+        }),
+      });
+
+      if (!ticketsResponse.ok) {
+        throw new Error(`Failed to fetch tickets: ${ticketsResponse.statusText}`);
+      }
+
+      const ticketsData = await ticketsResponse.json();
+      const pageTickets: JiraTicket[] = ticketsData.issues || [];
+      total = ticketsData.total ?? pageTickets.length;
+      allTickets = allTickets.concat(pageTickets);
+      startAt += pageTickets.length;
+      console.log(`[Tickets Service] Unattended: fetched ${allTickets.length} / ${total} tickets...`);
+      if (pageTickets.length < PAGE_SIZE) break;
+    }
+
+    const tickets = allTickets;
+    console.log(`[Tickets Service] Total active P1 tickets: ${tickets.length}`);
+
+    const now = new Date();
+    const thresholdMs = thresholdHours * 60 * 60 * 1000;
+    const unattended: UnattendedTicket[] = [];
+
+    for (const ticket of tickets) {
+      try {
+        const commentResponse = await fetch(
+          `http://localhost:3001/api/jira/api/issue/${ticket.key}/comment`,
+          { method: "GET", headers: { "Content-Type": "application/json" } }
+        );
+
+        let comments: JiraComment[] = [];
+        if (commentResponse.ok) {
+          const commentData = await commentResponse.json();
+          comments = commentData.comments || [];
+        }
+
+        const createdAt = ticket.fields.created;
+        const statusUpdatedAt = ticket.fields.updated; // Jira updates this on status change, assignment, etc.
+        let lastCommentAt: string | null = null;
+        let lastCommentBy: string | null = null;
+
+        // Reference times for both signals
+        const commentTime = comments.length > 0 ? new Date(comments[comments.length - 1].updated) : null;
+        const statusTime = new Date(statusUpdatedAt);
+        const creationTime = new Date(createdAt);
+
+        if (comments.length > 0) {
+          const latest = comments[comments.length - 1];
+          lastCommentAt = latest.updated;
+          lastCommentBy = latest.author?.displayName || "Unknown";
+        }
+
+        // Option D: use the MOST RECENT activity — comment OR status/field change
+        // This means ticket exits unattended list if either happens within threshold
+        const lastActivityTime = commentTime
+          ? new Date(Math.max(commentTime.getTime(), statusTime.getTime()))
+          : statusTime.getTime() > creationTime.getTime() ? statusTime : creationTime;
+
+        // Determine what the last activity type was
+        let lastActivityType: "comment" | "status_change" | "none";
+        if (!commentTime && statusTime.getTime() <= creationTime.getTime()) {
+          lastActivityType = "none";
+        } else if (!commentTime) {
+          lastActivityType = "status_change";
+        } else if (commentTime.getTime() >= statusTime.getTime()) {
+          lastActivityType = "comment";
+        } else {
+          lastActivityType = "status_change";
+        }
+
+        const silentMs = now.getTime() - lastActivityTime.getTime();
+        const silentHours = Math.round(silentMs / (60 * 60 * 1000));
+
+        if (silentMs >= thresholdMs) {
+          unattended.push({
+            ticketKey: ticket.key,
+            summary: ticket.fields.summary,
+            assignee: ticket.fields.assignee?.displayName || "Unassigned",
+            status: ticket.fields.status.name,
+            createdAt,
+            lastCommentAt,
+            lastCommentBy,
+            statusUpdatedAt,
+            silentHours,
+            reason: comments.length === 0 ? "no_comments" : "no_recent_response",
+            lastActivityType,
+          });
+        }
+      } catch (err) {
+        console.warn(`[Tickets Service] Error processing ${ticket.key}:`, err);
+      }
+    }
+
+    // Sort by most silent first
+    // Sort by least silent first (most recently unattended at top)
+    unattended.sort((a, b) => a.silentHours - b.silentHours);
+
+    console.log(`[Tickets Service] Found ${unattended.length} unattended tickets`);
+    return unattended;
+  } catch (error) {
+    console.error("[Tickets Service] Error fetching unattended tickets:", error);
     throw error;
   }
 }
