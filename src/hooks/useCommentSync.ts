@@ -23,6 +23,7 @@ export interface PendingComment {
   author: string;
   created: string;
   direction: "to-zlmc" | "to-z10";
+  mentions: string[];
 }
 
 export interface SyncAllSummary {
@@ -176,7 +177,12 @@ export function useCommentSync() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Poll failed");
         const results: PendingComment[] = data.results || [];
-        setPendingComments(results);
+        // Merge: keep existing unsynced comments, add any newly discovered ones
+        setPendingComments((prev) => {
+          const existingKeys = new Set(prev.map((p) => `${p.issueKey}::${p.commentId}`));
+          const newItems = results.filter((r) => !existingKeys.has(`${r.issueKey}::${r.commentId}`));
+          return [...prev, ...newItems];
+        });
         setScanStats({ scanned: data.scanned || 0, found: results.length });
         return results;
       } catch (e) {
@@ -204,6 +210,17 @@ export function useCommentSync() {
     }
   }, []);
 
+  /** Fetch the display name of the currently logged-in Jira user */
+  const fetchCurrentUser = useCallback(async (): Promise<{ displayName: string; email: string } | null> => {
+    try {
+      const res = await fetch(`${API_BASE}/api/jira/current-user`);
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    }
+  }, []);
+
   return {
     isSyncing,
     isSyncingAll,
@@ -218,6 +235,7 @@ export function useCommentSync() {
     autoDiscover,
     pollForSyncComments,
     fetchSyncHistory,
+    fetchCurrentUser,
   };
 }
 
@@ -232,13 +250,4 @@ export interface SyncRecord {
   timestamp: string;
   status: "success" | "failed";
   error?: string;
-}
-
-export interface PendingComment {
-  issueKey: string;
-  commentId: string;
-  commentBody: string;
-  author: string;
-  created: string;
-  direction: "to-zlmc" | "to-z10";
 }

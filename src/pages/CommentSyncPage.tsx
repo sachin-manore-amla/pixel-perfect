@@ -58,6 +58,7 @@ const CommentSyncPage = () => {
     autoDiscover,
     pollForSyncComments,
     fetchSyncHistory,
+    fetchCurrentUser,
   } = useCommentSync();
 
   const [issueKeysInput, setIssueKeysInput] = useState("");
@@ -73,6 +74,8 @@ const CommentSyncPage = () => {
   const HISTORY_PAGE_SIZE = 10;
   const nextPollRef = useRef<number>(Date.now() + AUTO_POLL_INTERVAL);
   const isFirstRunRef = useRef(true);
+  const [currentUserName, setCurrentUserName] = useState<string | null>(null);
+  const [mentionFilterEnabled, setMentionFilterEnabled] = useState(true);
 
   const runAutoDiscover = useCallback(async () => {
     try {
@@ -93,7 +96,8 @@ const CommentSyncPage = () => {
   useEffect(() => {
     fetchSyncHistory();
     runAutoDiscover();
-  }, [fetchSyncHistory, runAutoDiscover]);
+    fetchCurrentUser().then((u) => { if (u) setCurrentUserName(u.displayName); });
+  }, [fetchSyncHistory, runAutoDiscover, fetchCurrentUser]);
 
   // Auto-poll interval
   useEffect(() => {
@@ -139,7 +143,7 @@ const CommentSyncPage = () => {
   const handleSyncAll = async () => {
     setSyncAllSummary(null);
     try {
-      const summary = await syncAll(pendingComments);
+      const summary = await syncAll(visibleComments);
       setSyncAllSummary(
         `Done — ${summary.succeeded} synced, ${summary.skipped} skipped (already done), ${summary.failed} failed`
       );
@@ -149,6 +153,39 @@ const CommentSyncPage = () => {
   };
 
   const isLoading = isDiscovering || isPolling;
+
+  /**
+   * Render comment text with @mentions highlighted as blue pills.
+   * Splits on whitespace-separated tokens that look like @Word+ (Jira inlines them
+   * as plain text after ADF extraction).
+   */
+  function renderWithMentions(text: string, mentions: string[]) {
+    if (!mentions.length) return <>{text}</>;
+    // Build a regex that matches any of the known mention names
+    const escaped = mentions.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const pattern = new RegExp(`(@(?:${escaped.join("|")})\\b)`, "gi");
+    const parts = text.split(pattern);
+    return (
+      <>
+        {parts.map((part, i) =>
+          pattern.test(part) ? (
+            <span key={i} className="inline-flex items-center rounded-full bg-primary/15 text-primary px-1.5 py-0 font-semibold">
+              {part}
+            </span>
+          ) : (
+            <span key={i}>{part}</span>
+          )
+        )}
+      </>
+    );
+  }
+  // Filter pending comments: if mention filter is on, show only comments that
+  // mention the currently logged-in user (or untagged comments if no user resolved yet).
+  const visibleComments = mentionFilterEnabled && currentUserName
+    ? pendingComments.filter(
+        (c) => c.mentions.some((m) => m.toLowerCase() === currentUserName.toLowerCase())
+      )
+    : pendingComments;
 
   return (
     <DashboardLayout>
@@ -290,19 +327,53 @@ const CommentSyncPage = () => {
         )}
 
         {/* Empty state after load */}
-        {!isLoading && pendingComments.length === 0 && lastChecked && (
+        {!isLoading && visibleComments.length === 0 && lastChecked && (
           <div className="rounded bg-card border border-border px-4 py-6 text-center text-xs text-muted-foreground">
-            ✓ No pending comments. Boards are up to date as of {formatTime(lastChecked)}.
+            {pendingComments.length > 0 && mentionFilterEnabled
+              ? `✓ No comments mention you (${pendingComments.length} pending for others). `
+              : `✓ No pending comments. Boards are up to date as of ${formatTime(lastChecked)}.`}
+            {pendingComments.length > 0 && mentionFilterEnabled && (
+              <button
+                onClick={() => setMentionFilterEnabled(false)}
+                className="underline text-primary hover:opacity-80"
+              >
+                Show all {pendingComments.length}
+              </button>
+            )}
           </div>
         )}
 
-        {pendingComments.length > 0 && (
+        {/* Mention filter toggle — always visible once user is resolved */}
+        {currentUserName && (pendingComments.length > 0 || visibleComments.length > 0) && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Filter:</span>
+            <button
+              onClick={() => setMentionFilterEnabled((v) => !v)}
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
+                mentionFilterEnabled
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-border bg-muted text-muted-foreground"
+              }`}
+              title={mentionFilterEnabled ? "Showing only comments mentioning you — click to show all" : "Click to show only comments mentioning you"}
+            >
+              @{currentUserName.split(" ")[0]} only
+              {mentionFilterEnabled ? " ✓" : ""}
+            </button>
+            {mentionFilterEnabled && pendingComments.length > visibleComments.length && (
+              <span className="text-xs text-muted-foreground">
+                ({pendingComments.length - visibleComments.length} others hidden)
+              </span>
+            )}
+          </div>
+        )}
+
+        {visibleComments.length > 0 && (
           <div className="rounded bg-card border border-border overflow-hidden">
             <div className="px-4 py-2.5 bg-muted/50 border-b border-border flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <MessageSquare className="h-4 w-4 text-warning" />
                 <span className="text-xs font-semibold text-foreground uppercase tracking-wide">
-                  Pending Synchronization ({pendingComments.length})
+                  Pending Synchronization ({visibleComments.length})
                 </span>
               </div>
               <button
@@ -311,7 +382,7 @@ const CommentSyncPage = () => {
                 className="inline-flex items-center gap-1.5 rounded border border-border bg-primary text-primary-foreground px-3 py-1.5 text-xs font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSyncingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
-                {isSyncingAll ? "Syncing All…" : `Sync All (${pendingComments.length})`}
+                {isSyncingAll ? "Syncing All…" : `Sync All (${visibleComments.length})`}
               </button>
             </div>
 
@@ -334,7 +405,7 @@ const CommentSyncPage = () => {
                 </tr>
               </thead>
               <tbody>
-                {pendingComments.map((comment) => {
+                {visibleComments.map((comment) => {
                   const uid = `${comment.issueKey}-${comment.commentId}`;
                   const isSyncingThis = syncingId === uid;
                   const isDone = successIds.has(uid);
@@ -371,7 +442,9 @@ const CommentSyncPage = () => {
                             className="flex items-center gap-1 hover:text-foreground text-left"
                             title={isExpanded ? "Collapse" : "Preview comment"}
                           >
-                            <span className="truncate max-w-[180px]">{comment.commentBody}</span>
+                            <span className="truncate max-w-[180px] flex items-center gap-0.5 flex-wrap">
+                              {renderWithMentions(comment.commentBody.slice(0, 120), comment.mentions)}
+                            </span>
                             {isExpanded ? <ChevronUp className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
                           </button>
                         </td>
@@ -395,8 +468,16 @@ const CommentSyncPage = () => {
                         <tr key={`${uid}-expanded`} className="border-b border-border bg-muted/20">
                           <td colSpan={7} className="px-4 py-3">
                             <div className="rounded border border-border bg-muted/40 px-3 py-2 text-xs text-foreground whitespace-pre-wrap font-mono leading-relaxed">
-                              {comment.commentBody}
+                              {renderWithMentions(comment.commentBody, comment.mentions)}
                             </div>
+                            {comment.mentions.length > 0 && (
+                              <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+                                <span className="text-[10px] text-muted-foreground">Tagged:</span>
+                                {comment.mentions.map((m) => (
+                                  <span key={m} className="inline-flex items-center rounded-full bg-primary/15 text-primary px-1.5 py-0 text-[10px] font-semibold">@{m}</span>
+                                ))}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )}

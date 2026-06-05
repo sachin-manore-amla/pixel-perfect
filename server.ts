@@ -704,6 +704,24 @@ function extractADFText(body: unknown): string {
   return String(body);
 }
 
+/** Extract all @mentioned display names from an ADF comment body */
+function extractMentions(body: unknown): string[] {
+  const mentions: string[] = [];
+  if (typeof body !== "object" || body === null) return mentions;
+  const walk = (nodes: unknown[]) => {
+    for (const node of nodes as Array<{ type?: string; attrs?: { text?: string }; content?: unknown[] }>) {
+      if (node.type === "mention" && node.attrs?.text) {
+        // ADF mention text looks like "@Grecy Bais" — strip the leading @
+        mentions.push(node.attrs.text.replace(/^@/, "").trim());
+      }
+      if (node.content) walk(node.content);
+    }
+  };
+  const adf = body as { content?: unknown[] };
+  if (adf.content) walk(adf.content);
+  return mentions;
+}
+
 /** Use OpenAI to rewrite a comment for the target audience */
 async function transformCommentWithAI(
   commentBody: string,
@@ -723,8 +741,8 @@ async function transformCommentWithAI(
     // Fallback: return cleaned comment with a sync note
     const note =
       direction === "to-zlmc"
-        ? "\n\n[Synced from internal Z10 ticket]"
-        : "\n\n[Synced from client ZLMC ticket]";
+        ? "\n\n[Synced by JiraTriage from Z10 ticket]"
+        : "\n\n[Synced by JiraTriage from ZLMC ticket]";
     return cleaned + note;
   }
 
@@ -816,10 +834,7 @@ async function internalSyncComment(
   console.log(`[SYNC] Transforming comment (${direction}) for linked ticket ${linkedKey}`);
   const transformedComment = await transformCommentWithAI(commentBody, direction, ticketSummary);
 
-  const attribution =
-    direction === "to-zlmc"
-      ? `\n\n— Synced from internal ${issueKey} (Z10)`
-      : `\n\n— Synced from client ${issueKey} (ZLMC)`;
+  const attribution = `Synced by JiraTriage · ${issueKey}`;
 
   const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, {
     body: {
@@ -1044,6 +1059,7 @@ app.post(
         author: string;
         created: string;
         direction: "to-zlmc" | "to-z10";
+        mentions: string[];
       }> = [];
 
       // Fetch comments for all tickets in parallel (10 at a time)
@@ -1066,10 +1082,7 @@ app.post(
             const isToZ10 = /#updateforz10/i.test(text);
             if (!isToZLMC && !isToZ10) continue;
 
-            // Only show comments added after last sync
-            if (lastSyncedAt && new Date(c.created) <= new Date(lastSyncedAt)) continue;
-
-            // Secondary dedup by commentId
+            // Skip only comments that have already been synced
             if (isAlreadySynced(key, c.id)) continue;
 
             results.push({
@@ -1079,6 +1092,7 @@ app.post(
               author: c.author?.displayName || "Unknown",
               created: c.created,
               direction: isToZLMC ? "to-zlmc" : "to-z10",
+              mentions: extractMentions(c.body),
             });
           }
         },
@@ -1117,6 +1131,7 @@ app.post(
         author: string;
         created: string;
         direction: "to-zlmc" | "to-z10";
+        mentions: string[];
       }> = [];
 
       for (const key of issueKeys) {
@@ -1138,13 +1153,7 @@ app.post(
             console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | toZLMC=${isToZLMC} toZ10=${isToZ10}`);
             if (!isToZLMC && !isToZ10) continue;
 
-            // Only show comments created after the last sync
-            if (lastSyncedAt && new Date(c.created) <= new Date(lastSyncedAt)) {
-              console.log(`[POLL] Skipping ${key}::${c.id} — created before lastSyncedAt`);
-              continue;
-            }
-
-            // Secondary dedup: skip if already in synced set
+            // Skip only comments that have already been synced
             if (isAlreadySynced(key, c.id)) {
               console.log(`[POLL] Skipping ${key}::${c.id} — already synced`);
               continue;
@@ -1157,6 +1166,7 @@ app.post(
               author: c.author?.displayName || "Unknown",
               created: c.created,
               direction: isToZLMC ? "to-zlmc" : "to-z10",
+              mentions: extractMentions(c.body),
             });
           }
         } catch (e) {
@@ -1178,6 +1188,24 @@ app.post(
  */
 app.get("/api/jira/sync-history", requireJiraConfig, (req: Request, res: Response) => {
   res.json({ history: syncHistory, total: syncHistory.length });
+});
+
+/**
+ * GET /api/jira/current-user
+ * Returns the display name and email of the logged-in Jira user.
+ */
+app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    const response = await makeJiraRequest("GET", "/myself");
+    const data = await response.json();
+    res.json({
+      displayName: data.displayName || "",
+      email: data.emailAddress || "",
+      accountId: data.accountId || "",
+    });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch current user" });
+  }
 });
 
 /**
