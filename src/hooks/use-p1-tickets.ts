@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useJiraAPI } from "./use-jira-config";
+import { API_BASE } from "@/lib/jira";
 
 export interface JiraIssue {
   key: string;
@@ -58,14 +59,13 @@ export function useP1Tickets() {
     setError(null);
 
     try {
-      // JQL query for P1 tickets
-      // project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d
-      const jql = `project = "Z10-LMC" AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) AND updated >= -1d`;
+      // JQL query for P1 tickets updated in last 24h
+      const jql = `customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) AND updated >= -1d`;
 
       console.log("[P1 TICKETS] Fetching with JQL:", jql);
 
       // Use POST to /api/jira/search endpoint with JQL in body
-      const response = await fetch("http://localhost:3001/api/jira/search", {
+      const response = await fetch(`${API_BASE}/api/jira/search`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -100,7 +100,7 @@ export function useP1Tickets() {
 
           // Call watchers endpoint to get detailed watcher info
           const watchersResponse = await fetch(
-            `http://localhost:3001/api/jira/issue/${issue.key}/watchers`,
+            `${API_BASE}/api/jira/issue/${issue.key}/watchers`,
             {
               method: "GET",
               headers: {

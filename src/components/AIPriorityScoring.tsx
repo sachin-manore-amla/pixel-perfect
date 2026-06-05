@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
+import { getJiraIssueUrl } from "@/lib/jira";
 import { Brain, TrendingUp, TrendingDown, Loader2, ExternalLink } from "lucide-react";
 
 interface JiraIssue {
@@ -94,27 +96,10 @@ function getPriorityReason(issue: JiraIssue, score: number): string {
 
 export function AIPriorityScoring() {
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
   const [insights, setInsights] = useState<AIInsight[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [jiraUrl, setJiraUrl] = useState<string>("");
-
-  useEffect(() => {
-    // Fetch Jira config to get instance URL
-    const fetchJiraConfig = async () => {
-      try {
-        const response = await fetch("/api/jira/config");
-        const data = await response.json();
-        if (data.instanceUrl) {
-          setJiraUrl(data.instanceUrl);
-        }
-      } catch (err) {
-        console.error("Failed to fetch Jira config:", err);
-      }
-    };
-
-    fetchJiraConfig();
-  }, []);
 
   useEffect(() => {
     if (!isConfigured) {
@@ -127,7 +112,7 @@ export function AIPriorityScoring() {
       setError(null);
       try {
         // Fetch P1 tickets from last 7 days
-        const jql = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -7d`;
+        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -7d`;
         const response = await search<{ issues: JiraIssue[] }>(jql, {
           maxResults: 100,
           fields: ["summary", "status", "priority", "assignee", "created", "updated"],
@@ -155,7 +140,7 @@ export function AIPriorityScoring() {
     };
 
     fetchInsights();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   return (
     <div className="rounded bg-card border border-border p-5 animate-slide-in">
@@ -182,27 +167,15 @@ export function AIPriorityScoring() {
             <div key={insight.ticketKey} className="border border-border rounded p-3">
               <div className="flex items-center justify-between mb-1.5">
                 <div className="flex items-center gap-2">
-                  {jiraUrl ? (
-                    <a
-                      href={`${jiraUrl}/browse/${insight.ticketKey}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1"
-                    >
-                      {insight.ticketKey}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  ) : (
-                    <a
-                      href={`https://amla.atlassian.net/browse/${insight.ticketKey}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1"
-                    >
-                      {insight.ticketKey}
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  )}
+                  <a
+                    href={getJiraIssueUrl(insight.ticketKey)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-xs text-primary hover:text-primary/80 hover:underline transition-colors inline-flex items-center gap-1"
+                  >
+                    {insight.ticketKey}
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
                   <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
                     insight.sentiment === "critical" ? "bg-critical/10 text-critical" :
                     insight.sentiment === "urgent" ? "bg-warning/10 text-warning" :

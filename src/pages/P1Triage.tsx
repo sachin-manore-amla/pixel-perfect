@@ -1,9 +1,11 @@
 import { useState, useEffect } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, ExternalLink, Download, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getJiraIssueUrl } from "@/lib/jira";
 import {
   Select,
   SelectContent,
@@ -44,6 +46,7 @@ interface BucketData {
 
 export default function P1Triage() {
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
   const [buckets, setBuckets] = useState<BucketData>({
     all: [],
     "24h": [],
@@ -62,6 +65,10 @@ export default function P1Triage() {
       setError("Please configure Jira first");
       return;
     }
+    if (!projectJQL) {
+      setBuckets({ all: [], "24h": [], "15d": [], "30d": [] });
+      return;
+    }
 
     const fetchAllPeriods = async () => {
       setLoading(true);
@@ -75,7 +82,7 @@ export default function P1Triage() {
         };
 
         // All - No time restriction
-        const jqlAll = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
+        const jqlAll = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
         const responseAll = await search<{ issues: JiraIssue[]; total: number }>(
           jqlAll,
           { maxResults: 1000, fields: ["summary", "status", "priority", "assignee", "components", "labels", "created", "updated"] }
@@ -83,7 +90,7 @@ export default function P1Triage() {
         results.all = responseAll.issues || [];
 
         // Last 24 Hours
-        const jql24h = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
+        const jql24h = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
         const response24h = await search<{ issues: JiraIssue[]; total: number }>(
           jql24h,
           { maxResults: 1000, fields: ["summary", "status", "priority", "assignee", "components", "labels", "created", "updated"] }
@@ -91,7 +98,7 @@ export default function P1Triage() {
         results["24h"] = response24h.issues || [];
 
         // Last 15 Days
-        const jql15d = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
+        const jql15d = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
         const response15d = await search<{ issues: JiraIssue[]; total: number }>(
           jql15d,
           { maxResults: 1000, fields: ["summary", "status", "priority", "assignee", "components", "labels", "created", "updated"] }
@@ -99,7 +106,7 @@ export default function P1Triage() {
         results["15d"] = response15d.issues || [];
 
         // Last 30 Days
-        const jql30d = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -30d`;
+        const jql30d = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -30d`;
         const response30d = await search<{ issues: JiraIssue[]; total: number }>(
           jql30d,
           { maxResults: 1000, fields: ["summary", "status", "priority", "assignee", "components", "labels", "created", "updated"] }
@@ -117,7 +124,7 @@ export default function P1Triage() {
     };
 
     fetchAllPeriods();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   const getPriorityColor = (priority?: string) => {
     switch (priority?.toLowerCase()) {
@@ -294,7 +301,7 @@ export default function P1Triage() {
                         <tr key={issue.id} className="border-b border-border hover:bg-muted/50 transition">
                           <td className="px-4 py-3">
                             <a
-                              href={`https://amla.atlassian.net/browse/${issue.key}`}
+                              href={getJiraIssueUrl(issue.key)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="font-mono text-primary hover:underline inline-flex items-center gap-1"

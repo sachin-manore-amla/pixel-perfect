@@ -14,15 +14,19 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { useJiraConfig } from "@/hooks/use-jira-config";
+import { ProjectSelector } from "@/components/ProjectSelector";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 
 export function JiraConfigDialog() {
   const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<1 | 2>(1);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [testLoading, setTestLoading] = useState(false);
   const [testSuccess, setTestSuccess] = useState<boolean | null>(null);
   const { toast } = useToast();
   const { config, saveConfig, clearConfig, testConnection } = useJiraConfig();
+  const { selectedProjects } = useSelectedProjects();
 
   const [formData, setFormData] = useState({
     instanceUrl: "",
@@ -153,7 +157,7 @@ export function JiraConfigDialog() {
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setStep(1); }}>
       <DialogTrigger asChild>
         <Button
           variant="ghost"
@@ -164,19 +168,34 @@ export function JiraConfigDialog() {
           <Settings className="h-4 w-4" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Jira Configuration</DialogTitle>
+          <DialogTitle>
+            {step === 1 ? "Jira Configuration" : "Select Projects to Monitor"}
+          </DialogTitle>
           <DialogDescription>
-            Enter your Jira instance details and API credentials to connect to Jira
+            {step === 1
+              ? "Enter your Jira instance details and API credentials to connect to Jira"
+              : "Choose which projects you want to track in Attention Tracker"}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800 mb-4">
-          💡 <strong>Note:</strong> Make sure the backend proxy server is running. Use <code className="bg-blue-100 px-1 py-0.5 rounded">npm run server</code> or <code className="bg-blue-100 px-1 py-0.5 rounded">npm run dev:all</code>
+        {/* Step indicator */}
+        <div className="flex items-center gap-2 mb-2">
+          <div className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${step === 1 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>1</div>
+          <span className="text-xs text-muted-foreground">Connection</span>
+          <div className="flex-1 h-px bg-border" />
+          <div className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${step === 2 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'}`}>2</div>
+          <span className="text-xs text-muted-foreground">Projects</span>
         </div>
 
-        <div className="space-y-4">
+        {step === 2 ? (
+          <ProjectSelector onDone={() => { setOpen(false); setStep(1); }} />
+        ) : (
+          <div className="space-y-4">
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+            💡 <strong>Note:</strong> Make sure the backend proxy server is running. Use <code className="bg-blue-100 px-1 py-0.5 rounded">npm run server</code> or <code className="bg-blue-100 px-1 py-0.5 rounded">npm run dev:all</code>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="instanceUrl">Jira Instance URL</Label>
             <Input
@@ -268,27 +287,38 @@ export function JiraConfigDialog() {
             >
               {testLoading ? "Testing..." : "Test Connection"}
             </Button>
+            {testSuccess === true ? (
+              <Button
+                onClick={() => setStep(2)}
+                className="flex-1"
+              >
+                Next: Select Projects →
+              </Button>
+            ) : (
+              <Button
+                onClick={handleSave}
+                disabled={loading || testLoading}
+                className="flex-1"
+              >
+                {loading ? "Saving..." : "Save & Connect"}
+              </Button>
+            )}
           </div>
 
-          <div className="flex gap-2 pt-4 border-t">
-            <Button
-              onClick={handleSave}
-              disabled={loading || testLoading}
-              className="flex-1"
-            >
-              {loading ? "Saving..." : "Save Configuration"}
-            </Button>
-            {config && (
+          {config && (
+            <div className="pt-2 border-t">
               <Button
                 onClick={handleClearConfig}
                 variant="outline"
                 disabled={loading || testLoading}
+                className="w-full text-destructive hover:text-destructive"
               >
-                Clear
+                Disconnect Jira
               </Button>
-            )}
+            </div>
+          )}
           </div>
-        </div>
+        )}
       </DialogContent>
     </Dialog>
   );

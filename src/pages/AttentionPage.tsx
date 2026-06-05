@@ -1,13 +1,15 @@
 import { useState } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
-import { Eye, MessageCircle, Clock, Loader2, ChevronDown, ChevronUp, AlertTriangle, User, ChevronLeft, ChevronRight } from "lucide-react";
+import { Eye, MessageCircle, Clock, Loader2, ChevronDown, ChevronUp, AlertTriangle, User, ChevronLeft, ChevronRight, FolderOpen } from "lucide-react";
 import { useTicketsWithAnalysis } from "@/hooks/useTicketsWithAnalysis";
 import { useRecentActivity } from "@/hooks/useRecentActivity";
 import { useUnattendedTickets } from "@/hooks/useUnattendedTickets";
 import { useJiraConfig } from "@/hooks/use-jira-config";
 import { useCurrentJiraUser } from "@/hooks/useCurrentJiraUser";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 import { CommentsTimeline } from "@/components/CommentsTimeline";
 import { NewActivityTable } from "@/components/NewActivityTable";
+import { getJiraIssueUrl } from "@/lib/jira";
  
 const AttentionPage = () => {
   const [daysWindow, setDaysWindow] = useState<1 | 15 | 30>(30);
@@ -20,9 +22,10 @@ const AttentionPage = () => {
   const { config: jiraConfig } = useJiraConfig();
   const { data: currentJiraUser } = useCurrentJiraUser();
   const currentUserDisplayName = currentJiraUser?.displayName;
-  const { data: analysisData, isLoading, error } = useTicketsWithAnalysis(daysWindow);
-  const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1, currentUserDisplayName);
-  const { data: unattendedData, isLoading: unattendedLoading } = useUnattendedTickets(daysWindow * 24);
+  const { selectedProjects, isConfigured } = useSelectedProjects();
+  const { data: analysisData, isLoading, error } = useTicketsWithAnalysis(daysWindow, selectedProjects, currentJiraUser ?? undefined);
+  const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1, currentUserDisplayName, selectedProjects);
+  const { data: unattendedData, isLoading: unattendedLoading } = useUnattendedTickets(daysWindow * 24, selectedProjects, currentJiraUser ?? undefined);
   const attentionRequired = analysisData?.attentionRequired || [];
   const attentionCount = analysisData?.attentionCount || 0;
   const p1TotalPages = Math.ceil(attentionRequired.length / P1_PAGE_SIZE);
@@ -52,14 +55,29 @@ const AttentionPage = () => {
   return (
     <DashboardLayout>
       <div className="max-w-7xl mx-auto space-y-6">
+        {/* No projects selected — empty state */}
+        {!isConfigured && (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="w-14 h-14 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+              <FolderOpen className="h-7 w-7 text-primary" />
+            </div>
+            <h2 className="text-lg font-semibold text-foreground mb-2">No Projects Selected</h2>
+            <p className="text-sm text-muted-foreground mb-6 max-w-sm">
+              Click your <strong>profile icon</strong> in the top-right corner and select <strong>Edit Selected Projects</strong> to get started.
+            </p>
+          </div>
+        )}
+
+        {isConfigured && (<>
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-foreground">Attention Tracker</h1>
             <p className="text-sm text-muted-foreground mt-1">Monitor P1 tickets that need your immediate action</p>
           </div>
-         
-          {/* Time Window Filter */}
-          <div className="flex gap-2">
+
+          <div className="flex items-center gap-3">
+            {/* Time Window Filter */}
+            <div className="flex gap-2">
             <button
               onClick={() => { setDaysWindow(1); setP1Page(1); setUnattendedPage(1); }}
               className={`px-4 py-2 rounded font-medium text-sm transition-colors ${
@@ -91,6 +109,7 @@ const AttentionPage = () => {
               30 Days
             </button>
           </div>
+          </div>
         </div>
  
         {/* Section Guide */}
@@ -99,21 +118,31 @@ const AttentionPage = () => {
             <div className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-full bg-info/15 flex items-center justify-center text-info font-bold text-sm">1</div>
             <div>
               <p className="text-xs font-semibold text-foreground">P1 Tickets Needing Attention</p>
-              <p className="text-xs text-muted-foreground mt-0.5">AI-analyzed P1 tickets where comments suggest a blocker, unanswered question, or escalation is needed.</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                A ticket appears here only when <span className="text-foreground font-medium">both</span> conditions are met —
+                {" "}(1) you were <span className="text-info font-medium">@mentioned in the last 2–3 comments</span>,
+                {" "}and (2) AI or keyword analysis detects an <span className="text-info font-medium">unanswered question, blocker, or escalation</span> in the thread.
+              </p>
             </div>
           </div>
           <div className="flex gap-3 p-3 rounded-lg bg-warning/5 border border-warning/20">
             <div className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-full bg-warning/15 flex items-center justify-center text-warning font-bold text-sm">2</div>
             <div>
               <p className="text-xs font-semibold text-foreground">New Activity Since Your Last Comment</p>
-              <p className="text-xs text-muted-foreground mt-0.5">Tickets where someone else commented after your last reply — you may need to follow up.</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Tickets where <span className="text-foreground font-medium">1–3 new comments</span> have arrived after your last reply — you may need to follow up.
+                {" "}A ticket <span className="text-warning font-medium">automatically drops off</span> this list once 4 or more comments pile up without your response.
+              </p>
             </div>
           </div>
           <div className="flex gap-3 p-3 rounded-lg bg-critical/5 border border-critical/20">
             <div className="mt-0.5 flex-shrink-0 w-7 h-7 rounded-full bg-critical/15 flex items-center justify-center text-critical font-bold text-sm">3</div>
             <div>
               <p className="text-xs font-semibold text-foreground">P1 Unattended Tickets</p>
-              <p className="text-xs text-muted-foreground mt-0.5">Active P1 tickets where no one has commented or changed status within the selected time window.</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Active P1 tickets <span className="text-foreground font-medium">assigned to you or where you are @mentioned</span>, with
+                {" "}<span className="text-critical font-medium">no comment or status change</span> within the selected time window.
+              </p>
             </div>
           </div>
         </div>
@@ -186,7 +215,7 @@ const AttentionPage = () => {
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
                           <a
-                            href={`https://amla.atlassian.net/browse/${ticket.ticketKey}`}
+                            href={getJiraIssueUrl(ticket.ticketKey)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="font-mono text-sm font-semibold text-primary hover:underline"
@@ -333,7 +362,7 @@ const AttentionPage = () => {
                     <tr key={t.ticketKey} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
                       <td className="py-3 px-4">
                         <a
-                          href={`https://amla.atlassian.net/browse/${t.ticketKey}`}
+                          href={getJiraIssueUrl(t.ticketKey)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="font-mono text-primary font-semibold hover:underline"
@@ -341,7 +370,14 @@ const AttentionPage = () => {
                           {t.ticketKey}
                         </a>
                       </td>
-                      <td className="py-3 px-4 text-foreground max-w-[250px] truncate">{t.summary}</td>
+                      <td className="py-3 px-4 text-foreground max-w-[250px]">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate">{t.summary}</span>
+                          {t.isMentioned && (
+                            <span className="flex-shrink-0 text-xs font-semibold px-1.5 py-0.5 rounded bg-warning/20 text-warning">@mentioned</span>
+                          )}
+                        </div>
+                      </td>
                       <td className="py-3 px-4">
                         {t.assignee === "Unassigned" ? (
                           <span className="flex items-center gap-1 text-critical font-medium">
@@ -419,6 +455,7 @@ const AttentionPage = () => {
             </div>
           )}
         </div>
+        </>)}
       </div>
     </DashboardLayout>
   );

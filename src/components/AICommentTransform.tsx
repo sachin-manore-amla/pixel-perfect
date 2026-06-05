@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 import { MessageSquare, ArrowRight, Sparkles, Loader2 } from "lucide-react";
 
 interface JiraIssue {
@@ -46,6 +47,7 @@ function generateComments(issue: JiraIssue): CommentTransform {
 
 export function AICommentTransform() {
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
   const [comments, setComments] = useState<CommentTransform[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -61,7 +63,7 @@ export function AICommentTransform() {
       setLoading(true);
       setError(null);
       try {
-        const jql = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
+        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
         const response = await search<{ issues: JiraIssue[] }>(jql, {
           maxResults: 100,
           fields: ["summary", "status", "priority"],
@@ -80,7 +82,7 @@ export function AICommentTransform() {
     };
 
     fetchComments();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   if (loading) {
     return (

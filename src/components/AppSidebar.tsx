@@ -3,10 +3,7 @@ import {
   AlertTriangle,
   Eye,
   MessageSquare,
-  Clock,
-  Bell,
   Brain,
-  Settings,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -24,10 +21,7 @@ import {
   SidebarFooter,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { Badge } from "@/components/ui/badge";
-import { JiraConfigDialog } from "@/components/JiraConfigDialog";
 import { useJiraAPI } from "@/hooks/use-jira-config";
-import { mockAlerts } from "@/data/mockData";
 
 interface JiraUser {
   displayName: string;
@@ -41,17 +35,13 @@ const navItems = [
   { title: "P1 Triage", url: "/triage", icon: AlertTriangle },
   { title: "Attention", url: "/attention", icon: Eye },
   { title: "AI Insights", url: "/ai-insights", icon: Brain },
-  { title: "Alerts", url: "/alerts", icon: Bell },
   { title: "Comment Sync", url: "/sync", icon: MessageSquare },
-  { title: "SLA Monitor", url: "/sla", icon: Clock },
-  { title: "Settings", url: "/settings", icon: Settings },
 ];
 
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
   const location = useLocation();
-  const unackAlerts = mockAlerts.filter((a) => !a.acknowledged).length;
   const { get, isConfigured } = useJiraAPI();
   const [user, setUser] = useState<JiraUser | null>(null);
   const [loading, setLoading] = useState(false);
@@ -124,11 +114,6 @@ export function AppSidebar() {
                     >
                       <item.icon className="mr-2 h-4 w-4 shrink-0" />
                       {!collapsed && <span className="flex-1">{item.title}</span>}
-                      {!collapsed && item.title === "Alerts" && unackAlerts > 0 && (
-                        <Badge className="ml-auto bg-critical text-critical-foreground text-xs h-5 px-1.5 rounded">
-                          {unackAlerts}
-                        </Badge>
-                      )}
                     </NavLink>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
@@ -138,27 +123,7 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="p-4 border-t border-sidebar-border">
-        {!collapsed && (
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 flex-1">
-              <div className="h-7 w-7 rounded-full bg-primary flex items-center justify-center shrink-0">
-                <span className="text-xs font-medium text-primary-foreground">{initials}</span>
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-medium text-foreground truncate">{displayName}</p>
-                <p className="text-xs text-muted-foreground">{role}</p>
-              </div>
-            </div>
-            <JiraConfigDialog />
-          </div>
-        )}
-        {collapsed && (
-          <div className="flex justify-center">
-            <JiraConfigDialog />
-          </div>
-        )}
-      </SidebarFooter>
+      <SidebarFooter className="p-2 border-t border-sidebar-border" />
     </Sidebar>
   );
 }

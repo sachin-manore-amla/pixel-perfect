@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useJiraAPI } from "./use-jira-config";
+import { API_BASE } from "@/lib/jira";
 
 export interface TicketWithSummary {
   key: string;
@@ -123,13 +124,13 @@ export function useTicketSummaries() {
     console.log("[TICKET SUMMARIES] fetchTicketSummaries called, isConfigured:", isConfigured);
 
     try {
-      // Fetch tickets from Jira
-      const jql = `project = "Z10-LMC" AND type IN (Bug, Defect, Task) AND status NOT IN (Done, Closed, Rejected) ORDER BY updated DESC, priority DESC`;
+      // Fetch tickets from Jira (all projects — no project filter, ordered by priority)
+      const jql = `type IN (Bug, Defect, Task) AND status NOT IN (Done, Closed, Rejected) ORDER BY updated DESC, priority DESC`;
 
       console.log("[TICKET SUMMARIES] Fetching with JQL:", jql);
 
       // Use POST to /api/jira/search endpoint
-      const response = await fetch("http://localhost:3001/api/jira/search", {
+      const response = await fetch(`${API_BASE}/api/jira/search`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

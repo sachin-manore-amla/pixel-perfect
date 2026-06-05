@@ -25,8 +25,47 @@ interface JiraConfig {
 
 let jiraConfig: JiraConfig | null = null;
 
-// Initialize JIRA config from environment variables at startup
+// Path to persist config across server restarts
+const CONFIG_FILE = path.join(process.cwd(), ".jira-config.json");
+
+function loadPersistedConfig(): JiraConfig | null {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const raw = fs.readFileSync(CONFIG_FILE, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed.instanceUrl && parsed.email && parsed.apiToken) {
+        console.log("[INIT] Loaded Jira config from persisted file");
+        return parsed as JiraConfig;
+      }
+    }
+  } catch (e) {
+    console.warn("[INIT] Could not read persisted Jira config:", e);
+  }
+  return null;
+}
+
+function savePersistedConfig(config: JiraConfig | null) {
+  try {
+    if (config) {
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    } else {
+      if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
+    }
+  } catch (e) {
+    console.warn("[INIT] Could not persist Jira config:", e);
+  }
+}
+
+// Initialize JIRA config from persisted file or environment variables at startup
 const initJiraConfig = () => {
+  // 1. Try persisted config file first (saved from UI)
+  const persisted = loadPersistedConfig();
+  if (persisted) {
+    jiraConfig = persisted;
+    return;
+  }
+
+  // 2. Fall back to environment variables
   const instanceUrl = process.env.VITE_JIRA_API_URL;
   const email = process.env.VITE_JIRA_USERNAME;
   const apiToken = process.env.VITE_JIRA_PASSWORD;
@@ -39,7 +78,7 @@ const initJiraConfig = () => {
     };
     console.log("[INIT] JIRA config initialized from environment variables");
   } else {
-    console.warn("[INIT] JIRA credentials not found in environment variables");
+    console.warn("[INIT] JIRA credentials not found in environment variables or config file");
   }
 };
 
@@ -113,6 +152,7 @@ app.post("/api/jira/config", (req: Request, res: Response) => {
       apiToken,
     };
 
+    savePersistedConfig(jiraConfig);
     res.json({ success: true, message: "Jira config saved" });
   } catch (error) {
     res.status(500).json({
@@ -172,6 +212,7 @@ app.post("/api/jira/test", async (req: Request, res: Response) => {
  */
 app.delete("/api/jira/config", (req: Request, res: Response) => {
   jiraConfig = null;
+  savePersistedConfig(null);
   res.json({ success: true, message: "Jira config cleared" });
 });
 
@@ -464,6 +505,54 @@ app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: R
     console.error("[CURRENT USER ERROR]", error);
     res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to fetch current user",
+    });
+  }
+});
+
+/**
+ * GET /api/jira/projects
+ * Get all projects accessible by the current user
+ */
+app.get("/api/jira/projects", requireJiraConfig, async (req: Request, res: Response) => {
+  try {
+    // Fetch all projects with pagination
+    let allProjects: Array<{ id: string; key: string; name: string; projectTypeKey: string }> = [];
+    let startAt = 0;
+    const maxResults = 50;
+    let isLast = false;
+
+    while (!isLast) {
+      const response = await makeJiraRequest(
+        "GET",
+        `/project/search?startAt=${startAt}&maxResults=${maxResults}&orderBy=name&expand=lead`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch projects: ${response.status}`);
+      }
+
+      const data = await response.json() as any;
+      const projects = data.values || [];
+      allProjects = allProjects.concat(
+        projects.map((p: any) => ({
+          id: p.id,
+          key: p.key,
+          name: p.name,
+          projectTypeKey: p.projectTypeKey || "software",
+        }))
+      );
+
+      isLast = data.isLast ?? projects.length < maxResults;
+      startAt += projects.length;
+      if (projects.length === 0) break;
+    }
+
+    console.log(`[PROJECTS] Found ${allProjects.length} accessible projects`);
+    res.json({ projects: allProjects, total: allProjects.length });
+  } catch (error) {
+    console.error("[PROJECTS ERROR]", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to fetch projects",
     });
   }
 });
@@ -1216,7 +1305,7 @@ app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: R
  */
 app.post("/api/ai/analyze-comments", async (req: Request, res: Response) => {
   try {
-    const { ticketKey, ticketSummary, comments } = req.body;
+    const { ticketKey, ticketSummary, comments, mentionedUser } = req.body;
 
     const openaiApiKey = process.env.OPENAI_API_KEY || process.env.REACT_APP_OPENAI_API_KEY;
     if (!openaiApiKey || openaiApiKey.startsWith("sk-test")) {
@@ -1233,24 +1322,11 @@ app.post("/api/ai/analyze-comments", async (req: Request, res: Response) => {
       .map((c: { author: string; text: string }) => `[${c.author}]: ${c.text}`)
       .join("\n");
 
-    const prompt = `You are analyzing a Jira P1 production support ticket to determine if a manager needs to take immediate action.
+    const mentionContext = mentionedUser
+      ? `\nContext: The user "${mentionedUser}" was @mentioned in the last few comments. Set needsAttention=true if the mention is ACTIONABLE — meaning they are asked a direct question, asked to provide information or an update, need to resolve a blocker, take a specific action, or give approval. This includes phrases like "please provide", "can you check", "please share", "let us know", "your input needed" even without a question mark. Set needsAttention=false ONLY for passive mentions like FYI, CC, or "as per @user" references where no action is expected.`
+      : "";
 
-Ticket: ${ticketKey}
-Summary: ${ticketSummary}
-
-Recent Comments:
-${commentThread}
-
-Analyze the conversation and determine:
-1. Does this ticket need manager/lead attention RIGHT NOW? (true/false)
-2. Priority level:
-   - HIGH: production down, customers blocked, deployment failed, no one responding
-   - MEDIUM: unanswered question >4h, waiting for approval, unclear ownership
-   - LOW: routine update, progress shared, no action needed
-3. One line reason (max 100 characters)
-
-Respond ONLY in this exact JSON format with no extra text:
-{"needsAttention": true, "priority": "HIGH", "reason": "Production is down with no response for 6 hours"}`;
+    const prompt = `You are analyzing a Jira P1 ticket to determine if a specific user needs to take immediate action.\n\nTicket: ${ticketKey}\nSummary: ${ticketSummary}${mentionContext}\n\nRecent Comments:\n${commentThread}\n\nDetermine:\n1. Does the mentioned user need to take action? (true/false)\n   - true ONLY if: direct question asked, blocker to resolve, approval needed, explicit ask for their input\n   - false if: FYI mention, status update, general tag, no clear ask\n2. Priority: HIGH (production/customers impacted), MEDIUM (question unanswered >4h, waiting for approval), LOW (routine)\n3. Reason max 100 chars\n\nRespond ONLY with valid JSON:\n{"needsAttention": true, "priority": "HIGH", "reason": "Blocked deployment waiting for your approval"}`;
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",

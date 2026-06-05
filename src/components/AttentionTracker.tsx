@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { Eye, Loader2, ExternalLink } from "lucide-react";
 import { useJiraAPI } from "@/hooks/use-jira-config";
+import { getJiraIssueUrl } from "@/lib/jira";
 import {
   Dialog,
   DialogContent,
@@ -106,7 +107,7 @@ function IssueCard({
                 <tr key={issue.id} className="border-b border-border last:border-0 hover:bg-muted/50">
                   <td className="py-2 font-mono text-primary">
                     <a
-                      href={`https://amla.atlassian.net/browse/${issue.key}`}
+                      href={getJiraIssueUrl(issue.key)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="hover:underline flex items-center gap-1"
@@ -179,7 +180,7 @@ function AllIssuesModal({
                 <tr key={issue.id} className="border-b border-border hover:bg-muted/50">
                   <td className="py-2 px-2 font-mono text-primary">
                     <a
-                      href={`https://amla.atlassian.net/browse/${issue.key}`}
+                      href={getJiraIssueUrl(issue.key)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="hover:underline flex items-center gap-2"

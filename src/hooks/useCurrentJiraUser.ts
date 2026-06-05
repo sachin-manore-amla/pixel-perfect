@@ -7,7 +7,8 @@ interface JiraCurrentUser {
 }
 
 async function fetchCurrentJiraUser(): Promise<JiraCurrentUser> {
-  const response = await fetch("http://localhost:3001/api/jira/current-user");
+  const apiBase = import.meta.env.VITE_API_URL || "";
+  const response = await fetch(`${apiBase}/api/jira/current-user`);
   if (!response.ok) {
     throw new Error("Failed to fetch current Jira user");
   }

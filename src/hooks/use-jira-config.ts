@@ -7,18 +7,34 @@ export interface JiraConfig {
 }
 
 const STORAGE_KEY = "jira_config";
-const API_BASE = "http://localhost:3001/api/jira";
+const API_BASE = `${import.meta.env.VITE_API_URL || ""}/api/jira`;
 
 export function useJiraConfig() {
   const [config, setConfig] = useState<JiraConfig | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Load config from localStorage on mount
+  // Load config from localStorage on mount and sync to server
   useEffect(() => {
+    const syncToServer = async (cfg: JiraConfig) => {
+      try {
+        await fetch(`${API_BASE}/config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cfg),
+        });
+        console.log("[JiraConfig] Synced localStorage config to server on startup");
+      } catch (e) {
+        console.warn("[JiraConfig] Could not sync config to server:", e);
+      }
+    };
+
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        setConfig(JSON.parse(stored));
+        const parsed = JSON.parse(stored);
+        setConfig(parsed);
+        // Server may have restarted — push config back to it
+        syncToServer(parsed);
       }
     } catch (error) {
       console.error("Failed to load Jira config from localStorage:", error);

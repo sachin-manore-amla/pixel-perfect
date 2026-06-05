@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
+import { getJiraIssueUrl } from "@/lib/jira";
 import { Target, CircleDot, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 
 interface JiraIssue {
@@ -76,27 +78,10 @@ function generateActions(issue: JiraIssue): DetectedAction[] {
 
 export function AIActionDetection() {
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
   const [actions, setActions] = useState<DetectedAction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [jiraUrl, setJiraUrl] = useState<string>("");
-
-  useEffect(() => {
-    // Fetch Jira config to get instance URL
-    const fetchJiraConfig = async () => {
-      try {
-        const response = await fetch("/api/jira/config");
-        const data = await response.json();
-        if (data.instanceUrl) {
-          setJiraUrl(data.instanceUrl);
-        }
-      } catch (err) {
-        console.error("Failed to fetch Jira config:", err);
-      }
-    };
-
-    fetchJiraConfig();
-  }, []);
 
   useEffect(() => {
     if (!isConfigured) {
@@ -108,7 +93,7 @@ export function AIActionDetection() {
       setLoading(true);
       setError(null);
       try {
-        const jql = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
+        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
         const response = await search<{ issues: JiraIssue[] }>(jql, {
           maxResults: 100,
           fields: ["summary", "status", "priority", "assignee"],
@@ -138,7 +123,7 @@ export function AIActionDetection() {
     };
 
     fetchActions();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   const pending = actions.filter((a) => a.status === "pending");
   const done = actions.filter((a) => a.status === "done");
@@ -174,18 +159,14 @@ export function AIActionDetection() {
               }`} />
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-0.5">
-                  {jiraUrl ? (
-                    <a
-                      href={`${jiraUrl}/browse/${action.ticketKey}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-mono text-xs text-primary hover:underline transition-colors cursor-pointer"
-                    >
-                      {action.ticketKey}
-                    </a>
-                  ) : (
-                    <span className="font-mono text-xs text-primary">{action.ticketKey}</span>
-                  )}
+                  <a
+                    href={getJiraIssueUrl(action.ticketKey)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono text-xs text-primary hover:underline transition-colors cursor-pointer"
+                  >
+                    {action.ticketKey}
+                  </a>
                   <span className="text-xs text-muted-foreground">→</span>
                   <span className="text-xs font-medium text-foreground">{action.owner}</span>
                 </div>
@@ -204,18 +185,14 @@ export function AIActionDetection() {
             {done.slice(0, 3).map((action, i) => (
               <div key={i} className="flex items-center gap-3 p-2 opacity-60">
                 <CheckCircle2 className="h-3.5 w-3.5 text-success shrink-0" />
-                {jiraUrl ? (
-                  <a
-                    href={`${jiraUrl}/browse/${action.ticketKey}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-mono text-xs text-primary hover:underline transition-colors cursor-pointer"
-                  >
-                    {action.ticketKey}
-                  </a>
-                ) : (
-                  <span className="font-mono text-xs">{action.ticketKey}</span>
-                )}
+                <a
+                  href={getJiraIssueUrl(action.ticketKey)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-xs text-primary hover:underline transition-colors cursor-pointer"
+                >
+                  {action.ticketKey}
+                </a>
                 <span className="text-xs text-muted-foreground truncate">{action.owner}: {action.action}</span>
               </div>
             ))}

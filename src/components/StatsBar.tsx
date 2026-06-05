@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { mockTickets } from "@/data/mockData";
 import { Activity, AlertTriangle, Eye, Clock, CheckCircle, Loader2 } from "lucide-react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 
 interface JiraIssue {
   key: string;
@@ -26,6 +27,7 @@ export function StatsBar() {
   const [p1Total, setP1Total] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
 
   // Fetch real P1 count from Jira
   useEffect(() => {
@@ -39,7 +41,7 @@ export function StatsBar() {
 
       try {
         setIsLoading(true);
-        const jql = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
+        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
         const response = await search<SearchResponse>(jql, {
           maxResults: 100, // Fetch actual issues for reference
         });       
@@ -52,7 +54,7 @@ export function StatsBar() {
     };
 
     fetchP1Count();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   // Determine display count
   const displayP1Count = p1Total ?? 0;

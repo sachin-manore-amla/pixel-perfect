@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { OnboardingGate } from "@/components/OnboardingGate";
 import Index from "./pages/Index.tsx";
 import TriagePage from "./pages/TriagePage.tsx";
 import AttentionPage from "./pages/AttentionPage.tsx";
@@ -22,18 +23,20 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
-        <Routes>
-          <Route path="/" element={<Index />} />
-          <Route path="/triage" element={<P1Triage />} />
-          <Route path="/attention" element={<AttentionPage />} />
-          <Route path="/ai-insights" element={<AIInsightsPage />} />
-          <Route path="/alerts" element={<AlertsPage />} />
-          <Route path="/sync" element={<CommentSyncPage />} />
-          <Route path="/sla" element={<SLAMonitorPage />} />
-          <Route path="/settings" element={<Settings />} />
-          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
+        <OnboardingGate>
+          <Routes>
+            <Route path="/" element={<Index />} />
+            <Route path="/triage" element={<P1Triage />} />
+            <Route path="/attention" element={<AttentionPage />} />
+            <Route path="/ai-insights" element={<AIInsightsPage />} />
+            <Route path="/alerts" element={<AlertsPage />} />
+            <Route path="/sync" element={<CommentSyncPage />} />
+            <Route path="/sla" element={<SLAMonitorPage />} />
+            <Route path="/settings" element={<Settings />} />
+            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </OnboardingGate>
       </BrowserRouter>
     </TooltipProvider>
   </QueryClientProvider>

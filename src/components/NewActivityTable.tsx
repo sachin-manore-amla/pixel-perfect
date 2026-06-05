@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { MessageCircle, Eye, RotateCcw } from "lucide-react";
+import { getJiraIssueUrl } from "@/lib/jira";
 
 const SEEN_KEY = "new_activity_seen_tickets";
 
@@ -179,7 +180,7 @@ export function NewActivityTable({ items, isLoading = false, onClearCache, onVis
             <tr key={item.ticketKey} className={`border-b last:border-0 hover:bg-muted/30 transition-colors ${idx % 2 === 0 ? 'bg-muted/5' : ''}`}>
               <td className="py-3 px-4">
                 <a
-                  href={`https://amla.atlassian.net/browse/${item.ticketKey}`}
+                  href={getJiraIssueUrl(item.ticketKey)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-mono text-sm font-semibold text-primary hover:underline"

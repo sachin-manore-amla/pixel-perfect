@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Clock, AlertTriangle, TrendingUp, Loader2, ExternalLink } from "lucide-react";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
+import { getJiraIssueUrl } from "@/lib/jira";
 import {
   Dialog,
   DialogContent,
@@ -111,7 +113,7 @@ function BucketCard({
             {displayIssues.map((issue) => (
               <div key={issue.id} className="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/60 transition-colors">
                 <a
-                  href={`https://amla.atlassian.net/browse/${issue.key}`}
+                  href={getJiraIssueUrl(issue.key)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="font-mono text-sm font-semibold text-primary hover:underline flex items-center gap-2 min-w-0"
@@ -182,7 +184,7 @@ function AllIssuesModal({
                 <tr key={issue.id} className="border-b border-border hover:bg-muted/50 transition-colors">
                   <td className="py-3 px-3 font-mono font-semibold text-primary">
                     <a
-                      href={`https://amla.atlassian.net/browse/${issue.key}`}
+                      href={getJiraIssueUrl(issue.key)}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="hover:underline inline-flex items-center gap-2"
@@ -220,6 +222,7 @@ function AllIssuesModal({
 
 export function P1BucketSection() {
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
   const [buckets, setBuckets] = useState<BucketType>({
     "24h": [],
     "15d": [],
@@ -245,7 +248,7 @@ export function P1BucketSection() {
         };
 
         // Fetch Last 24 Hours
-        const jql24h = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
+        const jql24h = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
         const response24h = await search<{ issues: JiraIssue[]; total: number }>(
           jql24h,
           {
@@ -256,7 +259,7 @@ export function P1BucketSection() {
         results["24h"] = response24h.issues || [];
 
         // Fetch Last 15 Days
-        const jql15d = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
+        const jql15d = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
         const response15d = await search<{ issues: JiraIssue[]; total: number }>(
           jql15d,
           {
@@ -267,7 +270,7 @@ export function P1BucketSection() {
         results["15d"] = response15d.issues || [];
 
         // Fetch Last 30 Days
-        const jql30d = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -30d`;
+        const jql30d = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -30d`;
         const response30d = await search<{ issues: JiraIssue[]; total: number }>(
           jql30d,
           {
@@ -287,7 +290,7 @@ export function P1BucketSection() {
     };
 
     fetchP1Tickets();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   if (!isConfigured) {
     return (

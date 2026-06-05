@@ -1,3 +1,5 @@
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+
 export interface JiraComment {
   id: string;
   author: { displayName: string };
@@ -13,7 +15,7 @@ export interface JiraTicket {
     summary: string;
     status: { name: string };
     priority?: { name: string };
-    assignee?: { displayName: string } | null;
+    assignee?: { displayName: string; accountId?: string } | null;
     created: string;
     updated: string;
     comment?: {
@@ -35,7 +37,7 @@ export interface AttentionRequired {
 
 // Fetch P1 tickets that need attention
 // daysWindow: number of days to look back (default: 30)
-export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promise<{
+export async function fetchP1TicketsWithComments(daysWindow: number = 30, selectedProjects: string[] = [], currentUser?: CurrentUser): Promise<{
   tickets: JiraTicket[];
   attentionRequired: AttentionRequired[];
   attentionCount: number;
@@ -43,11 +45,20 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
   try {
     console.log(`[Tickets Service] Step 1: Fetching P1 tickets from last ${daysWindow} days...`);
 
+    // Build project filter from selected projects
+    if (selectedProjects.length === 0) {
+      console.warn("[Tickets Service] No projects selected, returning empty results.");
+      return { tickets: [], attentionRequired: [], attentionCount: 0 };
+    }
+    const projectFilter = selectedProjects.length === 1
+      ? `project = ${selectedProjects[0]}`
+      : `project IN (${selectedProjects.join(", ")})`;
+
     // Step 1: Fetch P1 tickets with broader status filtering (original curl approach)
     const jql =
-      'project = Z10-LMC AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)';
+      `${projectFilter} AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
 
-    const ticketsResponse = await fetch("http://localhost:3001/api/jira/search", {
+    const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -86,7 +97,7 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
     for (const ticket of tickets) {
       try {
         const commentResponse = await fetch(
-          `http://localhost:3001/api/jira/api/issue/${ticket.key}/comment`,
+          `${API_BASE}/api/jira/api/issue/${ticket.key}/comment`,
           {
             method: "GET",
             headers: {
@@ -122,8 +133,9 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
     console.log(`[Tickets Service] Total tickets with comments: ${ticketsWithComments.size}`);
 
     // Step 3: Analyze comments to identify attention-required tickets
-    console.log("[Tickets Service] Step 3: Analyzing comments for unanswered questions...");
+    console.log(`[Tickets Service] Step 3: Analyzing comments for attention (mentions + unanswered questions)...`);
     const attentionRequired: AttentionRequired[] = [];
+    const addedKeys = new Set<string>();
     const now = new Date();
     const windowMs = daysWindow * 24 * 60 * 60 * 1000;
     const windowStart = new Date(now.getTime() - windowMs);
@@ -136,7 +148,7 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
         continue;
       }
 
-      // Check if ticket has recent activity (comments or updates) within the time window
+      // Check if ticket has recent activity within the time window
       const hasRecentComments = comments.some((c) => new Date(c.updated) >= windowStart);
       const ticketUpdatedDate = new Date(ticket.fields.updated);
       const ticketIsRecent = ticketUpdatedDate >= windowStart;
@@ -148,20 +160,41 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
         continue;
       }
 
-      // Get the latest comment to check if it has unanswered questions
-      const latestComment = comments.length > 0 ? comments[comments.length - 1] : null;
+      // --- STEP A: Check if currentUser is mentioned in last 2-3 comments (AND condition) ---
+      let isMentionedRecently = false;
+      if (currentUser) {
+        const lastFewComments = comments.slice(-3);
+        isMentionedRecently = lastFewComments.some((c) => {
+          // ADF accountId check
+          if (typeof c.body === "object" && c.body !== null) {
+            const bodyStr = JSON.stringify(c.body);
+            if (
+              bodyStr.includes(`"id":"${currentUser.accountId}"`) ||
+              bodyStr.includes(`"accountId":"${currentUser.accountId}"`)
+            ) return true;
+          }
+          // Plain text / extracted text check
+          const text = extractCommentText(c.body).toLowerCase();
+          return text.includes(`@${currentUser.displayName.toLowerCase()}`);
+        });
+        if (!isMentionedRecently) {
+          console.log(`[Tickets Service] ${ticket.key}: currentUser not mentioned in last 3 comments — skipping`);
+          continue; // Must be mentioned — short-circuit
+        }
+        console.log(`[Tickets Service] ${ticket.key}: ✅ @${currentUser.displayName} mentioned in last 3 comments`);
+      }
 
+      // --- STEP B: AI / keyword analysis — question or blocker must also be present ---
+      const latestComment = comments[comments.length - 1];
       if (latestComment) {
-        // Handle both string and ADF (Atlassian Document Format) body formats
-        const bodyText = typeof latestComment.body === "string" 
-          ? latestComment.body 
+        const bodyText = typeof latestComment.body === "string"
+          ? latestComment.body
           : JSON.stringify(latestComment.body).substring(0, 50);
         console.log(
           `[Tickets Service] ${ticket.key} - Latest comment by ${latestComment.author?.displayName}: "${bodyText}..."`
         );
       }
 
-      // Analyze for attention using Gemini AI (with keyword fallback)
       const commentsForAI = comments.map((c) => ({
         author: c.author?.displayName || "Unknown",
         text: extractCommentText(c.body).substring(0, 300),
@@ -169,13 +202,14 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
 
       let analysis: AnalysisResult;
       try {
-        const aiResponse = await fetch("http://localhost:3001/api/ai/analyze-comments", {
+        const aiResponse = await fetch(`${API_BASE}/api/ai/analyze-comments`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ticketKey: ticket.key,
             ticketSummary: ticket.fields.summary,
             comments: commentsForAI,
+            mentionedUser: currentUser?.displayName,
           }),
         });
 
@@ -188,7 +222,6 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
           };
           console.log(`[AI] ${ticket.key}: ${analysis.needsAttention ? "⚠️ Needs Attention" : "✅ OK"} — ${analysis.reason}`);
         } else {
-          // OpenAI not configured or returned error — fallback to keyword analysis
           console.log(`[AI] ${ticket.key}: OpenAI unavailable, using keyword fallback`);
           analysis = analyzeCommentsForUnanswered(comments);
         }
@@ -196,21 +229,30 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30): Promi
         console.log(`[AI] ${ticket.key}: OpenAI call failed, using keyword fallback`);
         analysis = analyzeCommentsForUnanswered(comments);
       }
+
       console.log(
-        `[Tickets Service] ${ticket.key} - Needs Attention: ${analysis.needsAttention}, Reason: ${analysis.reason}`
+        `[Tickets Service] ${ticket.key} - Mention: ${isMentionedRecently}, AI needsAttention: ${analysis.needsAttention}, Reason: ${analysis.reason}`
       );
 
-      if (analysis.needsAttention) {
+      // --- FINAL: Both conditions must be true (AND logic) ---
+      // If no currentUser configured, fall back to AI-only check
+      const shouldAdd = currentUser
+        ? isMentionedRecently && analysis.needsAttention
+        : analysis.needsAttention;
+
+      if (shouldAdd && !addedKeys.has(ticket.key)) {
+        const mentionNote = currentUser ? ` + @${currentUser.displayName} tagged` : "";
         attentionRequired.push({
           ticketKey: ticket.key,
           ticketSummary: ticket.fields.summary,
-          reason: analysis.reason,
+          reason: `${analysis.reason}${mentionNote}`,
           priority: analysis.priority,
           updated: ticket.fields.updated,
           status: ticket.fields.status.name,
-          comments: comments,
+          comments,
           commentCount: comments.length,
         });
+        addedKeys.add(ticket.key);
       }
     }
 
@@ -238,7 +280,7 @@ function extractCommentText(body: string | { type: string; version: number; cont
   if (typeof body === "string") {
     return body;
   }
-  // For ADF (Atlassian Document Format), try to extract text from content
+  // For ADF (Atlassian Document Format), extract text from all node types
   if (typeof body === "object" && body.content) {
     try {
       const texts: string[] = [];
@@ -246,7 +288,13 @@ function extractCommentText(body: string | { type: string; version: number; cont
         if (!Array.isArray(items)) return;
         for (const item of items) {
           if (typeof item === "object") {
+            // Regular text node
             if (item.text) texts.push(item.text);
+            // Mention node — attrs.text holds "@DisplayName"
+            if (item.type === "mention" && item.attrs?.text) texts.push(item.attrs.text);
+            // Emoji node — attrs.text holds the emoji shortname
+            if (item.attrs?.text && item.type !== "mention") texts.push(item.attrs.text);
+            // Recurse into content
             if (item.content) extractFromContent(item.content);
           }
         }
@@ -261,59 +309,62 @@ function extractCommentText(body: string | { type: string; version: number; cont
 }
 
 function analyzeCommentsForUnanswered(comments: JiraComment[]): AnalysisResult {
+  // Only analyze last 3 comments — same window as mention check
+  const recentComments = comments.slice(-3);
+
   const keywordPatterns = {
-    questions: ["?", "why", "how", "what", "when", "where"],
-    blockers: ["blocking", "blocked", "blocker", "stuck", "cannot"],
-    help: ["help", "urgent", "asap", "need", "please"],
-    unresolved: ["unresolved", "pending", "waiting", "pending approval"],
+    // Actual question mark
+    questions: ["?"],
+    // Specific blocker words
+    blockers: ["blocking", "blocked", "blocker", "stuck", "cannot proceed", "can't proceed", "production down", "outage"],
+    // Specific urgency
+    urgent: ["urgent", "asap", "escalate", "escalation", "critical", "sev1"],
+    // Explicit unresolved markers
+    unresolved: ["unresolved", "no response", "no update", "waiting for", "pending approval"],
+    // Actionable info requests — someone asking for input/action
+    actionRequest: ["please", "can you", "could you", "would you", "please share", "please provide", "let us know", "need your", "waiting on you", "your input", "your thoughts", "please check", "please confirm", "please review", "please help"],
   };
 
   let questionCount = 0;
   let blockerCount = 0;
-  let helpCount = 0;
+  let urgentCount = 0;
   let unresolvedCount = 0;
+  let actionRequestCount = 0;
 
-  for (const comment of comments) {
+  for (const comment of recentComments) {
     const text = extractCommentText(comment.body).toLowerCase();
-
-    if (keywordPatterns.questions.some((kw) => text.includes(kw))) {
-      questionCount++;
-    }
-    if (keywordPatterns.blockers.some((kw) => text.includes(kw))) {
-      blockerCount++;
-    }
-    if (keywordPatterns.help.some((kw) => text.includes(kw))) {
-      helpCount++;
-    }
-    if (keywordPatterns.unresolved.some((kw) => text.includes(kw))) {
-      unresolvedCount++;
-    }
+    if (keywordPatterns.questions.some((kw) => text.includes(kw))) questionCount++;
+    if (keywordPatterns.blockers.some((kw) => text.includes(kw))) blockerCount++;
+    if (keywordPatterns.urgent.some((kw) => text.includes(kw))) urgentCount++;
+    if (keywordPatterns.unresolved.some((kw) => text.includes(kw))) unresolvedCount++;
+    if (keywordPatterns.actionRequest.some((kw) => text.includes(kw))) actionRequestCount++;
   }
 
-  // Determine if ticket needs attention
-  const needsAttention =
-    questionCount > 0 || blockerCount > 0 || helpCount > 0 || unresolvedCount > 0;
+  // Needs attention if any actionable signal found
+  const needsAttention = questionCount > 0 || blockerCount > 0 || unresolvedCount > 0 || actionRequestCount > 0;
 
   if (!needsAttention) {
     return { needsAttention: false, reason: "", priority: "LOW" };
   }
 
-  // Determine priority
   let priority: "HIGH" | "MEDIUM" | "LOW" = "LOW";
   let reason = "";
 
-  if (blockerCount > 0 && helpCount > 0) {
+  if (blockerCount > 0 && urgentCount > 0) {
     priority = "HIGH";
-    reason = `Blocking issue with urgency (${blockerCount} blockers, ${helpCount} urgent mentions)`;
+    reason = `Blocking issue with urgency (${blockerCount} blockers, ${urgentCount} urgent mentions)`;
   } else if (blockerCount > 0) {
     priority = "HIGH";
     reason = `Ticket has blocking issues (${blockerCount} mentions)`;
-  } else if (helpCount > 0 && questionCount > 0) {
+  } else if (unresolvedCount > 0 && questionCount > 0) {
     priority = "MEDIUM";
-    reason = `Unanswered questions with urgency requests (${questionCount} questions, ${helpCount} help requests)`;
-  } else if (helpCount > 0) {
+    reason = `Unanswered questions with no response (${questionCount} questions, ${unresolvedCount} unresolved markers)`;
+  } else if (urgentCount > 0) {
     priority = "MEDIUM";
-    reason = `Urgent response needed (${helpCount} urgent mentions)`;
+    reason = `Urgent response needed (${urgentCount} urgent mentions)`;
+  } else if (actionRequestCount > 0) {
+    priority = "MEDIUM";
+    reason = `Action or information requested from you in recent comments`;
   } else if (questionCount > 0) {
     priority = "MEDIUM";
     reason = `Unanswered questions in comments (${questionCount} questions)`;
@@ -337,13 +388,22 @@ export interface NewActivity {
 }
 
 // Fetch recent P1 tickets with new activity
-export async function fetchRecentActivity(daysWindow: number = 1, currentUserDisplayName?: string): Promise<NewActivity[]> {
+export async function fetchRecentActivity(daysWindow: number = 1, currentUserDisplayName?: string, selectedProjects: string[] = []): Promise<NewActivity[]> {
   try {
     console.log(`[Tickets Service] Fetching recent activity from last ${daysWindow} days...`);
 
-    // Fetch P1 tickets from Z10-LMC and Z10 projects using pagination
+    // Build project filter from selected projects
+    if (selectedProjects.length === 0) {
+      console.warn("[Tickets Service] No projects selected, returning empty results.");
+      return [];
+    }
+    const projectFilter = selectedProjects.length === 1
+      ? `project = ${selectedProjects[0]}`
+      : `project IN (${selectedProjects.join(", ")})`;
+
+    // Fetch P1 tickets from selected projects using pagination
     const jql =
-      '(project = Z10-LMC OR project = Z10) AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC';
+      `${projectFilter} AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;
@@ -352,7 +412,7 @@ export async function fetchRecentActivity(daysWindow: number = 1, currentUserDis
 
     // Paginate through all results
     while (startAt < total) {
-      const ticketsResponse = await fetch("http://localhost:3001/api/jira/search", {
+      const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -389,7 +449,7 @@ export async function fetchRecentActivity(daysWindow: number = 1, currentUserDis
     for (const ticket of tickets) {
       try {
         const commentResponse = await fetch(
-          `http://localhost:3001/api/jira/api/issue/${ticket.key}/comment`,
+          `${API_BASE}/api/jira/api/issue/${ticket.key}/comment`,
           {
             method: "GET",
             headers: {
@@ -433,6 +493,13 @@ export async function fetchRecentActivity(daysWindow: number = 1, currentUserDis
 
             if (relevantComments.length === 0) {
               console.log(`[RecentActivity] ${ticket.key}: No new comments after user's last comment — skipping`);
+              continue;
+            }
+
+            // Only show if there are 1-3 new comments after user's last comment
+            // If 4+ comments have piled up without user's response, remove from list
+            if (relevantComments.length > 3) {
+              console.log(`[RecentActivity] ${ticket.key}: ${relevantComments.length} comments after user's last — too many (>3), skipping`);
               continue;
             }
 
@@ -488,6 +555,7 @@ export interface UnattendedTicket {
   ticketKey: string;
   summary: string;
   assignee: string;
+  assigneeAccountId: string | null;
   status: string;
   createdAt: string;
   lastCommentAt: string | null;   // null = no comments ever
@@ -496,18 +564,32 @@ export interface UnattendedTicket {
   silentHours: number;            // hours since last activity (comment OR status change)
   reason: "no_comments" | "no_recent_response";
   lastActivityType: "comment" | "status_change" | "none"; // what was the last activity
+  isMentioned: boolean; // true if currentUser is @mentioned in any comment
 }
 
 // Fetch P1 tickets that are truly unattended:
 //   - No comments at all, OR
 //   - Last comment is older than `thresholdHours` (default 24h)
-export async function fetchUnattendedTickets(thresholdHours: number = 24): Promise<UnattendedTicket[]> {
+export interface CurrentUser {
+  accountId: string;
+  displayName: string;
+}
+
+export async function fetchUnattendedTickets(thresholdHours: number = 24, selectedProjects: string[] = [], currentUser?: CurrentUser): Promise<UnattendedTicket[]> {
   try {
     console.log(`[Tickets Service] Fetching unattended P1 tickets (threshold: ${thresholdHours}h)...`);
 
-    // Z10-LMC only, pagination
+    // Build project filter from selected projects
+    if (selectedProjects.length === 0) {
+      console.warn("[Tickets Service] No projects selected, returning empty results.");
+      return [];
+    }
+    const projectFilter = selectedProjects.length === 1
+      ? `project = ${selectedProjects[0]}`
+      : `project IN (${selectedProjects.join(", ")})`;
+
     const jql =
-      'project = Z10-LMC AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC';
+      `${projectFilter} AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;
@@ -515,14 +597,15 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24): Promi
     let total = Infinity;
 
     while (startAt < total) {
-      const ticketsResponse = await fetch("http://localhost:3001/api/jira/search", {
+      const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+          body: JSON.stringify({
           jql,
           maxResults: PAGE_SIZE,
           startAt,
           fields: ["summary", "status", "assignee", "created", "updated"],
+          expand: ["names"],
         }),
       });
 
@@ -537,9 +620,7 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24): Promi
       startAt += pageTickets.length;
       console.log(`[Tickets Service] Unattended: fetched ${allTickets.length} / ${total} tickets...`);
       if (pageTickets.length < PAGE_SIZE) break;
-    }
-
-    const tickets = allTickets;
+    }    const tickets = allTickets;
     console.log(`[Tickets Service] Total active P1 tickets: ${tickets.length}`);
 
     const now = new Date();
@@ -549,7 +630,7 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24): Promi
     for (const ticket of tickets) {
       try {
         const commentResponse = await fetch(
-          `http://localhost:3001/api/jira/api/issue/${ticket.key}/comment`,
+          `${API_BASE}/api/jira/api/issue/${ticket.key}/comment`,
           { method: "GET", headers: { "Content-Type": "application/json" } }
         );
 
@@ -596,11 +677,27 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24): Promi
         const silentMs = now.getTime() - lastActivityTime.getTime();
         const silentHours = Math.round(silentMs / (60 * 60 * 1000));
 
+        // Check if currentUser is @mentioned in LAST 3 comments only (ADF mention node OR plain text @name)
+        const recentComments = comments.slice(-3);
+        const isMentioned = currentUser ? recentComments.some((c) => {
+          const text = extractCommentText(c.body);
+          // Plain text mention check
+          if (text.toLowerCase().includes(`@${currentUser.displayName.toLowerCase()}`)) return true;
+          // ADF mention node check (accountId)
+          if (typeof c.body === 'object' && c.body !== null) {
+            const bodyStr = JSON.stringify(c.body);
+            if (bodyStr.includes(`"id":"${currentUser.accountId}"`)) return true;
+            if (bodyStr.includes(`"accountId":"${currentUser.accountId}"`)) return true;
+          }
+          return false;
+        }) : false;
+
         if (silentMs >= thresholdMs) {
           unattended.push({
             ticketKey: ticket.key,
             summary: ticket.fields.summary,
             assignee: ticket.fields.assignee?.displayName || "Unassigned",
+            assigneeAccountId: ticket.fields.assignee?.accountId || null,
             status: ticket.fields.status.name,
             createdAt,
             lastCommentAt,
@@ -609,6 +706,7 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24): Promi
             silentHours,
             reason: comments.length === 0 ? "no_comments" : "no_recent_response",
             lastActivityType,
+            isMentioned,
           });
         }
       } catch (err) {
@@ -616,9 +714,23 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24): Promi
       }
     }
 
-    // Sort by most silent first
     // Sort by least silent first (most recently unattended at top)
     unattended.sort((a, b) => a.silentHours - b.silentHours);
+
+    // Filter by current user: keep only tickets assigned to user (by accountId) OR user is @mentioned in comments
+    if (currentUser) {
+      const filtered = unattended.filter((t) => {
+        // Prefer accountId match (reliable), fallback to displayName
+        const isAssigned = t.assigneeAccountId
+          ? t.assigneeAccountId === currentUser.accountId
+          : t.assignee === currentUser.displayName;
+        if (isAssigned) return true;
+        if (t.isMentioned) return true;
+        return false;
+      });
+      console.log(`[Tickets Service] After user filter (${currentUser.displayName}): ${filtered.length} / ${unattended.length} tickets`);
+      return filtered;
+    }
 
     console.log(`[Tickets Service] Found ${unattended.length} unattended tickets`);
     return unattended;

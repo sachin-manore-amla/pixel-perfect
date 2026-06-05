@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTicketsWithAnalysis } from "@/hooks/useTicketsWithAnalysis";
 import { Loader2, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { CommentsTimeline } from "@/components/CommentsTimeline";
+import { getJiraIssueUrl } from "@/lib/jira";
 
 interface WindowData {
   label: string;
@@ -70,7 +71,7 @@ function TimeWindowBlock({ window, expandedTicket, setExpandedTicket }: {
               >
                 <div className="flex-1 min-w-0">
                   <a
-                    href={`https://amla.atlassian.net/browse/${ticket.ticketKey}`}
+                    href={getJiraIssueUrl(ticket.ticketKey)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-mono text-xs font-semibold text-primary hover:underline"

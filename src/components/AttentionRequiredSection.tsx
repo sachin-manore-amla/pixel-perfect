@@ -1,5 +1,6 @@
 import { useTicketsWithAnalysis } from "@/hooks/useTicketsWithAnalysis";
 import { AlertCircle, Loader2, ChevronRight, Clock } from "lucide-react";
+import { getJiraIssueUrl } from "@/lib/jira";
 
 interface AttentionTicket {
   ticketKey: string;
@@ -103,7 +104,7 @@ export function AttentionRequiredSection() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-2">
                   <a
-                    href={`https://amla.atlassian.net/browse/${ticket.ticketKey}`}
+                    href={getJiraIssueUrl(ticket.ticketKey)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-mono text-sm font-semibold text-primary hover:underline"
@@ -136,7 +137,7 @@ export function AttentionRequiredSection() {
               </div>
 
               <a
-                href={`https://amla.atlassian.net/browse/${ticket.ticketKey}`}
+                href={getJiraIssueUrl(ticket.ticketKey)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex-shrink-0 p-2 hover:bg-muted rounded transition-colors"

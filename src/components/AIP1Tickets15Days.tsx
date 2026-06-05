@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { useJiraJQLSearch } from "@/hooks/use-jira-config";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
+import { getJiraIssueUrl } from "@/lib/jira";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Loader2, ExternalLink, AlertCircle } from "lucide-react";
@@ -35,6 +37,7 @@ interface JiraIssue {
 
 export function AIP1Tickets15Days() {
   const { search, isConfigured } = useJiraJQLSearch();
+  const { projectJQL } = useSelectedProjects();
   const [tickets, setTickets] = useState<JiraIssue[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +55,7 @@ export function AIP1Tickets15Days() {
       setError(null);
       try {
         // JQL for last 15 days P1 tickets
-        const jql = `project = Z10-LMC AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
+        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
 
         const response = await search<{ issues: JiraIssue[]; total: number }>(jql, {
           maxResults: 1000,
@@ -70,7 +73,7 @@ export function AIP1Tickets15Days() {
     };
 
     fetchTickets();
-  }, [isConfigured, search]);
+  }, [isConfigured, search, projectJQL]);
 
   const getPriorityColor = (priority?: string) => {
     if (!priority) return "bg-gray-100 text-gray-800";
@@ -165,7 +168,7 @@ export function AIP1Tickets15Days() {
                     <tr key={issue.id} className="border-b border-border hover:bg-muted/50 transition">
                       <td className="px-4 py-3">
                         <a
-                          href={`https://amla.atlassian.net/browse/${issue.key}`}
+                          href={getJiraIssueUrl(issue.key)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="font-mono text-primary hover:underline inline-flex items-center gap-1"
