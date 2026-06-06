@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Load environment variables from .env.local first, then .env
 dotenv.config({ path: path.join(process.cwd(), ".env.local") });
@@ -125,6 +126,27 @@ async function makeJiraRequest(
   return fetch(url, options);
 }
 
+/** Helper to make Jira Agile API requests (different base path: /rest/agile/1.0/) */
+async function makeAgileRequest(
+  method: string,
+  endpoint: string
+): Promise<globalThis.Response> {
+  if (!jiraConfig) {
+    throw new Error("Jira configuration not found");
+  }
+  const url = `${jiraConfig.instanceUrl}/rest/agile/1.0${endpoint}`;
+  const authHeader = `Basic ${Buffer.from(
+    `${jiraConfig.email}:${jiraConfig.apiToken}`
+  ).toString("base64")}`;
+  return fetch(url, {
+    method,
+    headers: {
+      Authorization: authHeader,
+      "Content-Type": "application/json",
+    },
+  });
+}
+
 /**
  * POST /api/jira/config
  * Save Jira configuration
@@ -153,6 +175,7 @@ app.post("/api/jira/config", (req: Request, res: Response) => {
     };
 
     savePersistedConfig(jiraConfig);
+    clearBoardAdminCache();
     res.json({ success: true, message: "Jira config saved" });
   } catch (error) {
     res.status(500).json({
@@ -213,6 +236,7 @@ app.post("/api/jira/test", async (req: Request, res: Response) => {
 app.delete("/api/jira/config", (req: Request, res: Response) => {
   jiraConfig = null;
   savePersistedConfig(null);
+  clearBoardAdminCache();
   res.json({ success: true, message: "Jira config cleared" });
 });
 
@@ -510,6 +534,33 @@ app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: R
 });
 
 /**
+ * POST /api/ai/summarize
+ * Summarize a comment using Gemini AI.
+ * Body: { text: string }
+ */
+app.post("/api/ai/summarize", async (req: Request, res: Response) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "text is required" });
+    }
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ error: "GEMINI_API_KEY not configured" });
+    }
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const prompt = `Summarize the following Jira comment in 2-3 concise sentences. Keep it factual, preserve key details like ticket references and action items, and do not add anything not present in the original:\n\n${text}`;
+    const result = await model.generateContent(prompt);
+    const summary = result.response.text().trim();
+    res.json({ summary });
+  } catch (error) {
+    console.error("[SUMMARIZE ERROR]", error);
+    res.status(500).json({ error: error instanceof Error ? error.message : "Summarize failed" });
+  }
+});
+
+/**
  * GET /api/jira/projects
  * Get all projects accessible by the current user
  */
@@ -693,7 +744,7 @@ interface SyncRecord {
   id: string;
   sourceKey: string;
   targetKey: string;
-  direction: "to-zlmc" | "to-z10";
+  direction: string; // e.g. "Z10 → Z10LMC"
   commentId: string;
   originalComment: string;
   transformedComment: string;
@@ -750,6 +801,17 @@ const syncHistory: SyncRecord[] = _initialState.history;
 const syncedCommentIds = new Set<string>(_initialState.syncedIds);
 let lastSyncedAt: string | null = _initialState.lastSyncedAt;
 
+// Board admin cache — maps boardId → Set<accountId> of admins (15-min TTL)
+let boardAdminMap = new Map<number, Set<string>>();
+let boardNameMap = new Map<number, string>();
+let boardCacheBuiltAt: number | null = null;
+const BOARD_CACHE_TTL_MS = 15 * 60 * 1000;
+function clearBoardAdminCache() {
+  boardAdminMap = new Map();
+  boardNameMap = new Map();
+  boardCacheBuiltAt = null;
+}
+
 /** Register a record, update dedup + lastSyncedAt to now, and persist to disk */
 function registerSyncRecord(record: SyncRecord) {
   syncHistory.unshift(record);
@@ -781,16 +843,82 @@ function extractADFText(body: unknown): string {
     }
     const texts: string[] = [];
     const walk = (nodes: unknown[]) => {
-      for (const node of nodes as Array<{ type?: string; text?: string; content?: unknown[] }>) {
+      for (const node of nodes as Array<{ type?: string; text?: string; attrs?: { text?: string }; content?: unknown[] }>) {
         if (node.type === "text" && node.text) texts.push(node.text);
+        // Emit mention display name inline so it appears in commentBody for rendering
+        if (node.type === "mention" && node.attrs?.text) texts.push(node.attrs.text);
         if (node.content) walk(node.content);
       }
     };
     walk(adf.content);
-    // Join without separator — preserves hashtags like #updateforz10 that may span zero boundaries
-    return texts.join("");
+    // Join with newline so #update on its own paragraph doesn't bleed into the next word,
+    // which would cause /#update\b/ to fail (e.g. "#updateNew" has no word boundary after "update").
+    return texts.join("\n");
   }
   return String(body);
+}
+
+/** Escape HTML special characters */
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Render an ADF node tree to HTML, preserving bullets, bold, mentions, etc. */
+function renderADFNodes(nodes: unknown[]): string {
+  return (nodes as Array<Record<string, unknown>>).map(renderADFNode).join("");
+}
+function renderADFNode(n: Record<string, unknown>): string {
+  const children = Array.isArray(n.content) ? renderADFNodes(n.content as unknown[]) : "";
+  switch (n.type) {
+    case "doc": return children;
+    case "paragraph": return `<p>${children || "<br>"}</p>`;
+    case "heading": {
+      const lvl = Number((n.attrs as Record<string, unknown>)?.level ?? 3);
+      return `<h${lvl}>${children}</h${lvl}>`;
+    }
+    case "bulletList": return `<ul>${children}</ul>`;
+    case "orderedList": return `<ol>${children}</ol>`;
+    case "listItem": return `<li>${children}</li>`;
+    case "blockquote": return `<blockquote>${children}</blockquote>`;
+    case "codeBlock": return `<pre><code>${children}</code></pre>`;
+    case "rule": return "<hr>";
+    case "hardBreak": return "<br>";
+    case "text": {
+      let t = escHtml(String(n.text ?? ""));
+      const marks = Array.isArray(n.marks)
+        ? (n.marks as Array<{ type: string; attrs?: Record<string, unknown> }>)
+        : [];
+      for (const mark of marks) {
+        if (mark.type === "strong") t = `<strong>${t}</strong>`;
+        else if (mark.type === "em") t = `<em>${t}</em>`;
+        else if (mark.type === "code") t = `<code>${t}</code>`;
+        else if (mark.type === "strike") t = `<s>${t}</s>`;
+        else if (mark.type === "underline") t = `<u>${t}</u>`;
+        else if (mark.type === "link") {
+          const href = escHtml(String(mark.attrs?.href ?? ""));
+          t = `<a href="${href}" target="_blank" rel="noopener noreferrer">${t}</a>`;
+        }
+      }
+      return t;
+    }
+    case "mention": {
+      const text = escHtml(String((n.attrs as Record<string, unknown>)?.text ?? ""));
+      return `<span class="adf-mention">${text}</span>`;
+    }
+    case "inlineCard": return ""; // displayed separately in external links section
+    case "mediaSingle": return ""; // displayed separately as attachment badges
+    case "media": return ""; // displayed separately as attachment badges
+    default:
+      return children; // recurse into unknown node types
+  }
+}
+
+/** Convert a full ADF document to HTML */
+function extractADFHtml(body: unknown): string {
+  if (typeof body !== "object" || body === null) return "";
+  const doc = body as { type?: string; content?: unknown[] };
+  if (!Array.isArray(doc.content)) return "";
+  return renderADFNodes(doc.content);
 }
 
 /** Extract all @mentioned display names from an ADF comment body */
@@ -811,81 +939,196 @@ function extractMentions(body: unknown): string[] {
   return mentions;
 }
 
-/** Use OpenAI to rewrite a comment for the target audience */
-async function transformCommentWithAI(
-  commentBody: string,
-  direction: "to-zlmc" | "to-z10",
-  ticketSummary: string
-): Promise<string> {
-  const openaiApiKey =
-    process.env.OPENAI_API_KEY || process.env.REACT_APP_OPENAI_API_KEY;
+/**
+ * Walk a comment's ADF body and extract only the media files and external
+ * link cards embedded in THAT comment — not all issue-level attachments.
+ */
+function extractCommentMediaInfo(body: unknown): {
+  attachments: Array<{ name: string }>;
+  links: string[];
+} {
+  const attachments: Array<{ name: string }> = [];
+  const links: string[] = [];
+  if (typeof body !== "object" || body === null) return { attachments, links };
+  const walk = (nodes: unknown[]) => {
+    for (const node of nodes as Array<{ type?: string; attrs?: Record<string, unknown>; content?: unknown[] }>) {
+      if (node.type === "media") {
+        // Some Jira clients embed __fileName in the attrs; fall back to media type label
+        const fileName = node.attrs?.["__fileName"] as string | undefined;
+        const mediaType = String(node.attrs?.["type"] ?? "file");
+        attachments.push({ name: fileName || (mediaType === "image" ? "image" : "file") });
+      }
+      if (node.type === "inlineCard" && node.attrs?.["url"]) {
+        links.push(String(node.attrs["url"]));
+      }
+      if (node.content) walk(node.content);
+    }
+  };
+  const adf = body as { content?: unknown[] };
+  if (adf.content) walk(adf.content);
+  return { attachments, links };
+}
 
-  // Clean up hashtag regardless
-  const cleaned = commentBody
-    .replace(/#updateforzlmc/gi, "")
-    .replace(/#updateforz10/gi, "")
-    .trim();
+/**
+ * Walk an ADF document and remove all occurrences of #update from text nodes.
+ * Preserves all formatting marks, mentions, bullet lists, tables, etc.
+ */
+function stripHashtagFromADF(node: unknown): unknown {
+  if (typeof node !== "object" || node === null) return node;
+  const n = node as Record<string, unknown>;
 
-  if (!openaiApiKey || openaiApiKey.startsWith("sk-test")) {
-    // Fallback: return cleaned comment with a sync note
-    const note =
-      direction === "to-zlmc"
-        ? "\n\n[Synced by JiraTriage from Z10 ticket]"
-        : "\n\n[Synced by JiraTriage from ZLMC ticket]";
-    return cleaned + note;
+  // Text node — strip the hashtag in-place
+  if (n.type === "text" && typeof n.text === "string") {
+    const cleaned = n.text.replace(/#update\b/gi, "").replace(/^\s+/, "");
+    if (cleaned === "") return null; // drop empty text nodes
+    return { ...n, text: cleaned };
   }
 
-  const systemPrompt =
-    direction === "to-zlmc"
-      ? `You are helping sync internal engineering comments to a client-facing Jira board (ZLMC).
-Rewrite the comment below to be professional, clear, and client-friendly.
-Rules:
-- Remove internal jargon, team names, internal tool references, and developer-only details.
-- Focus on: what was done, current status, and any action needed from the client.
-- Do NOT include the hashtag #updateforzlmc in the output.
-- Write in a professional, reassuring tone.
-- Keep it concise (max 3–4 sentences unless the original requires more detail).`
-      : `You are helping sync a client comment from ZLMC to an internal engineering Jira board (Z10).
-Rewrite the comment below to be useful for the internal engineering team.
-Rules:
-- Preserve all client-reported details and reproduction steps.
-- Prefix with: "[Synced from ZLMC client ticket]"
-- Do NOT include the hashtag #updateforz10 in the output.
-- Keep it factual and actionable for engineers.`;
+  // Any node with children — recurse and filter out nulls
+  if (Array.isArray(n.content)) {
+    const cleanedContent = (n.content as unknown[])
+      .map(stripHashtagFromADF)
+      .filter((c) => c !== null);
+    return { ...n, content: cleanedContent };
+  }
+
+  return n;
+}
+
+/**
+ * Walk an ADF node tree and remap every media node's collection ID
+ * from the source issue to the destination issue, so inline images
+ * render correctly after the comment is posted to the other ticket.
+ */
+function remapMediaCollections(node: unknown, destIssueId: string): unknown {
+  if (typeof node !== "object" || node === null) return node;
+  const n = node as Record<string, unknown>;
+
+  if (n.type === "media" && n.attrs && typeof n.attrs === "object") {
+    const attrs = n.attrs as Record<string, unknown>;
+    return { ...n, attrs: { ...attrs, collection: `contentId-${destIssueId}` } };
+  }
+
+  if (Array.isArray(n.content)) {
+    return { ...n, content: (n.content as unknown[]).map((c) => remapMediaCollections(c, destIssueId)) };
+  }
+
+  return n;
+}
+
+/**
+ * Download all attachments from the source issue and re-upload them to
+ * the destination issue. Runs fire-and-forget — never throws.
+ */
+async function copyAttachmentsToDestination(
+  sourceKey: string,
+  destKey: string,
+  attachments: Array<{ filename: string; content: string; mimeType: string }>
+): Promise<void> {
+  if (!jiraConfig || attachments.length === 0) return;
+  const auth = `Basic ${Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString("base64")}`;
+  console.log(`[SYNC] Copying ${attachments.length} attachment(s) from ${sourceKey} → ${destKey}`);
+
+  const results = await Promise.allSettled(
+    attachments.map(async (att) => {
+      const dlRes = await fetch(att.content, { headers: { Authorization: auth } });
+      if (!dlRes.ok) throw new Error(`Download failed for "${att.filename}": ${dlRes.status}`);
+      const buffer = await dlRes.arrayBuffer();
+      const blob = new Blob([buffer], { type: att.mimeType });
+
+      const form = new FormData();
+      form.append("file", blob, att.filename);
+      const uploadRes = await fetch(
+        `${jiraConfig!.instanceUrl}/rest/api/3/issue/${destKey}/attachments`,
+        {
+          method: "POST",
+          headers: { Authorization: auth, "X-Atlassian-Token": "no-check" },
+          body: form,
+        }
+      );
+      if (!uploadRes.ok) throw new Error(`Upload failed for "${att.filename}": ${uploadRes.status}`);
+      console.log(`[SYNC] Copied attachment "${att.filename}" → ${destKey}`);
+    })
+  );
+
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length > 0) {
+    console.warn(
+      `[SYNC] ${failed.length} attachment(s) failed to copy to ${destKey}:`,
+      (failed as PromiseRejectedResult[]).map((r) => r.reason?.message).join(", ")
+    );
+  }
+}
+
+/** Build (or refresh) the in-memory board admin cache for all selected projects */
+async function buildBoardAdminCache(projects: string[]): Promise<void> {
+  const now = Date.now();
+  if (boardCacheBuiltAt && now - boardCacheBuiltAt < BOARD_CACHE_TTL_MS) return;
+
+  console.log("[BOARD CACHE] Building board admin cache for:", projects);
+  const newAdminMap = new Map<number, Set<string>>();
+  const newNameMap = new Map<number, string>();
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${openaiApiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: systemPrompt },
-          {
-            role: "user",
-            content: `Ticket summary: ${ticketSummary}\n\nComment:\n${cleaned}`,
-          },
-        ],
-        max_tokens: 500,
-        temperature: 0.3,
-      }),
-    });
+    const boardLists = await Promise.allSettled(
+      projects.map((projectKey) =>
+        makeAgileRequest("GET", `/board?projectKeyOrId=${encodeURIComponent(projectKey)}`)
+          .then(async (res) => {
+            if (!res.ok) {
+              console.warn(`[BOARD CACHE] ${res.status} on board list for ${projectKey} — skipping`);
+              return [] as Array<{ id: number; name: string }>;
+            }
+            const data = await res.json() as { values?: Array<{ id: number; name: string }> };
+            return data.values || [];
+          })
+          .catch(() => [] as Array<{ id: number; name: string }>)
+      )
+    );
 
-    const data = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    return data.choices?.[0]?.message?.content?.trim() || cleaned;
-  } catch (err) {
-    console.error("[AI TRANSFORM ERROR]", err);
-    return cleaned;
+    const allBoards: Array<{ id: number; name: string }> = boardLists.flatMap((r) =>
+      r.status === "fulfilled" ? r.value : []
+    );
+
+    if (allBoards.length === 0) {
+      console.warn("[BOARD CACHE] No boards returned — admin check disabled, allowing all");
+      boardCacheBuiltAt = now;
+      boardAdminMap = newAdminMap;
+      boardNameMap = newNameMap;
+      return;
+    }
+
+    await Promise.allSettled(
+      allBoards.map(async (board) => {
+        try {
+          const res = await makeAgileRequest("GET", `/board/${board.id}`);
+          if (!res.ok) return;
+          const data = await res.json() as {
+            admins?: { users?: Array<{ accountId: string }> };
+          };
+          const adminIds = new Set<string>(
+            (data.admins?.users || []).map((u) => u.accountId)
+          );
+          newAdminMap.set(board.id, adminIds);
+          newNameMap.set(board.id, board.name);
+        } catch {
+          // skip individual board failures
+        }
+      })
+    );
+
+    boardAdminMap = newAdminMap;
+    boardNameMap = newNameMap;
+    boardCacheBuiltAt = now;
+    console.log(`[BOARD CACHE] Cached ${newAdminMap.size} boards`);
+  } catch (e) {
+    console.warn("[BOARD CACHE] Failed to build cache:", e);
   }
 }
 
 /**
  * Core sync logic — shared between single and bulk sync endpoints.
+ * Fetches the raw ADF comment from Jira, strips #update, and posts as-is
+ * to the cloned linked ticket — preserving all formatting and @mentions.
  */
 async function internalSyncComment(
   issueKey: string,
@@ -893,57 +1136,121 @@ async function internalSyncComment(
   commentId: string,
   author: string
 ): Promise<SyncRecord> {
-  const isToZLMC = /#updateforzlmc/i.test(commentBody);
-  const direction: "to-zlmc" | "to-z10" = isToZLMC ? "to-zlmc" : "to-z10";
-
   console.log(`[SYNC] Fetching issue ${issueKey} for linked tickets`);
-  const issueRes = await makeJiraRequest("GET", `/issue/${issueKey}?fields=summary,issuelinks`);
+  const issueRes = await makeJiraRequest("GET", `/issue/${issueKey}?fields=summary,issuelinks,attachment`);
   if (!issueRes.ok) throw new Error(`Failed to fetch issue ${issueKey} from Jira (${issueRes.status})`);
   const issueData = await issueRes.json();
-  const ticketSummary: string = issueData.fields?.summary || "";
 
   const links: Array<{
+    type?: { name?: string; inward?: string; outward?: string };
     outwardIssue?: { key: string };
     inwardIssue?: { key: string };
   }> = issueData.fields?.issuelinks || [];
 
-  let linkedKey: string | null = null;
-  for (const link of links) {
-    const candidate = link.outwardIssue?.key || link.inwardIssue?.key;
-    if (!candidate) continue;
-    if (direction === "to-zlmc" && /^Z10LMC-/i.test(candidate)) { linkedKey = candidate; break; }
-    if (direction === "to-z10" && /^Z10-\d/i.test(candidate)) { linkedKey = candidate; break; }
-  }
+  const attachments: Array<{ filename: string; content: string; mimeType: string }> =
+    issueData.fields?.attachment || [];
+
+  // Only sync across "is cloned by" / "clones" relationships
+  const cloneLink = links.find(
+    (l) =>
+      l.type?.name === "Cloners" ||
+      l.type?.inward === "is cloned by" ||
+      l.type?.outward === "clones"
+  );
+  const linkedKey = cloneLink?.outwardIssue?.key || cloneLink?.inwardIssue?.key;
 
   if (!linkedKey) {
-    const target = direction === "to-zlmc" ? "ZLMC (Z10LMC-*)" : "Z10 (Z10-*)";
-    throw new Error(`No linked ${target} ticket found on ${issueKey}. Ensure tickets are linked in Jira.`);
+    throw new Error(
+      `No 'is cloned by' linked ticket found on ${issueKey}. Ensure a clone link exists in Jira.`
+    );
   }
 
-  console.log(`[SYNC] Transforming comment (${direction}) for linked ticket ${linkedKey}`);
-  const transformedComment = await transformCommentWithAI(commentBody, direction, ticketSummary);
+  const sourceProject = issueKey.split("-")[0];
+  const targetProject = linkedKey.split("-")[0];
+  const direction = `${sourceProject} → ${targetProject}`;
 
-  const attribution = `Synced by JiraTriage · ${issueKey}`;
+  // Fetch the raw ADF body + destination contacts in parallel
+  const [rawADFResult, destContactsResult] = await Promise.allSettled([
+    commentId
+      ? makeJiraRequest("GET", `/issue/${issueKey}/comment/${commentId}`)
+          .then(async (r) => {
+            if (!r.ok) return null;
+            const d = await r.json() as { body?: Record<string, unknown> };
+            return d.body ?? null;
+          })
+          .catch(() => null)
+      : Promise.resolve(null),
+    makeJiraRequest("GET", `/issue/${linkedKey}?fields=reporter,comment`)
+      .then(async (r) => {
+        if (!r.ok) return null;
+        const d = await r.json() as {
+          id?: string;
+          fields?: {
+            reporter?: { accountId?: string; displayName?: string };
+            comment?: { comments?: Array<{ author?: { accountId?: string; displayName?: string } }> };
+          };
+        };
+        return { destId: d.id ?? "", fields: d.fields ?? null };
+      })
+      .catch(() => null),
+  ]);
 
-  const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, {
-    body: {
-      type: "doc",
-      version: 1,
-      content: [
-        { type: "paragraph", content: [{ type: "text", text: transformedComment }] },
-        {
-          type: "paragraph",
-          content: [
-            {
-              type: "text",
-              text: attribution.trim(),
-              marks: [{ type: "em" }],
-            },
-          ],
-        },
-      ],
-    },
-  });
+  const rawADF = rawADFResult.status === "fulfilled" ? rawADFResult.value : null;
+  const destResult = destContactsResult.status === "fulfilled" ? destContactsResult.value : null;
+  const destId = destResult?.destId ?? "";
+  const destFields = destResult?.fields ?? null;
+
+  // Build notification paragraph (destination reporter + last commenter, deduped by accountId)
+  const contactMap = new Map<string, string>(); // accountId → displayName
+  if (destFields?.reporter?.accountId) {
+    contactMap.set(destFields.reporter.accountId, destFields.reporter.displayName ?? "");
+  }
+  const destComments = destFields?.comment?.comments ?? [];
+  const lastCommenter = destComments[destComments.length - 1]?.author;
+  if (lastCommenter?.accountId && !contactMap.has(lastCommenter.accountId)) {
+    contactMap.set(lastCommenter.accountId, lastCommenter.displayName ?? "");
+  }
+  let notificationParagraph: unknown | null = null;
+  if (contactMap.size > 0) {
+    const mentionNodes: unknown[] = [];
+    contactMap.forEach((displayName, accountId) => {
+      if (mentionNodes.length > 0) mentionNodes.push({ type: "text", text: " " });
+      mentionNodes.push({ type: "mention", attrs: { id: accountId, text: `@${displayName}` } });
+    });
+    notificationParagraph = { type: "paragraph", content: mentionNodes };
+  }
+
+  // Strip #update from the ADF tree; fall back to plain-text paragraph if no ADF
+  const attribution = `Posted by JiraTriage · ${issueKey}`;
+  const attributionParagraph = {
+    type: "paragraph",
+    content: [{ type: "text", text: attribution, marks: [{ type: "em" }] }],
+  };
+
+  let postBody: unknown;
+  if (rawADF && rawADF.type === "doc" && Array.isArray(rawADF.content)) {
+    const cleanedADF = stripHashtagFromADF(rawADF) as Record<string, unknown>;
+    const remappedContent = destId
+      ? (cleanedADF.content as unknown[]).map((c) => remapMediaCollections(c, destId))
+      : (cleanedADF.content as unknown[]) ?? [];
+    const bodyContent: unknown[] = [];
+    if (notificationParagraph) bodyContent.push(notificationParagraph);
+    bodyContent.push(...remappedContent, attributionParagraph);
+    postBody = { type: "doc", version: 1, content: bodyContent };
+  } else {
+    // Fallback: plain text (formatting not available)
+    const cleaned = commentBody.replace(/#update\b/gi, "").trim();
+    const bodyContent: unknown[] = [];
+    if (notificationParagraph) bodyContent.push(notificationParagraph);
+    bodyContent.push(
+      { type: "paragraph", content: [{ type: "text", text: cleaned }] },
+      attributionParagraph,
+    );
+    postBody = { type: "doc", version: 1, content: bodyContent };
+  }
+
+  console.log(`[SYNC] Copying comment to ${linkedKey} (${direction})`);
+  const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, { body: postBody });
   const postData = await postRes.json();
 
   const record: SyncRecord = {
@@ -953,7 +1260,7 @@ async function internalSyncComment(
     direction,
     commentId,
     originalComment: commentBody,
-    transformedComment,
+    transformedComment: commentBody.replace(/#update\b/gi, "").trim(),
     author,
     timestamp: new Date().toISOString(),
     status: postRes.ok ? "success" : "failed",
@@ -962,6 +1269,12 @@ async function internalSyncComment(
 
   registerSyncRecord(record);
   console.log(`[SYNC] ${record.status.toUpperCase()} — ${issueKey} → ${linkedKey}`);
+
+  // Copy attachments fire-and-forget — does not block the sync response
+  if (record.status === "success" && attachments.length > 0) {
+    copyAttachmentsToDestination(issueKey, linkedKey, attachments).catch(() => {/* logged inside */});
+  }
+
   return record;
 }
 
@@ -982,8 +1295,8 @@ app.post(
 
       const isToZLMC = /#updateforzlmc/i.test(commentBody);
       const isToZ10 = /#updateforz10/i.test(commentBody);
-      if (!isToZLMC && !isToZ10) {
-        return res.status(400).json({ error: "No sync hashtag (#updateforzlmc or #updateforz10) found in comment" });
+      if (!isToZLMC && !isToZ10 && !/#update\b/i.test(commentBody)) {
+        return res.status(400).json({ error: "No sync hashtag (#update) found in comment" });
       }
 
       // Dedup by commentId
@@ -1077,43 +1390,52 @@ async function runConcurrent<T>(
 
 /**
  * POST /api/jira/auto-discover
- * JQL-scan both Z10 and Z10LMC for comments with sync hashtags.
- * Optimized: smart JQL window based on lastSyncedAt + parallel comment fetching.
- * Body: { days?: number (default 1), maxIssues?: number (default 200) }
+ * JQL-scan selected projects for comments with #update hashtag.
+ * Optimized: parallel project JQL + parallel comment fetching (10 at a time).
+ * Body: { days?: number (default 1), maxIssues?: number (default 200), projects?: string[] }
  */
 app.post(
   "/api/jira/auto-discover",
   requireJiraConfig,
   async (req: Request, res: Response) => {
     try {
-      const { days = 1, maxIssues = 200 } = req.body || {};
+      const { days = 1, maxIssues = 200, projects = [] } = req.body || {};
 
       if (!jiraConfig) return res.status(400).json({ error: "Jira not configured" });
+      if (!Array.isArray(projects) || projects.length === 0) {
+        return res.json({ results: [], scanned: 0, message: "No projects configured" });
+      }
 
       const authHeader = `Basic ${Buffer.from(
         `${jiraConfig.email}:${jiraConfig.apiToken}`
       ).toString("base64")}`;
 
-      // Compute JQL window: use lastSyncedAt for tight filtering when available,
-      // otherwise fall back to the `days` param.
+      // Resolve current user + prime board admin cache in parallel (cache TTL-aware)
+      const [myselfResult] = await Promise.allSettled([
+        makeJiraRequest("GET", "/myself"),
+        buildBoardAdminCache(projects as string[]),
+      ]);
+      let currentUserAccountId: string | null = null;
+      if (myselfResult.status === "fulfilled" && myselfResult.value.ok) {
+        const me = await myselfResult.value.json() as { accountId?: string };
+        currentUserAccountId = me.accountId ?? null;
+      }
+
+      // Smart window: tighten JQL window based on time since last sync
       let updatedFilter: string;
       if (lastSyncedAt) {
         const msSince = Date.now() - new Date(lastSyncedAt).getTime();
-        const daysSince = Math.ceil(msSince / 86_400_000) + 1; // +1 buffer
+        const daysSince = Math.ceil(msSince / 86_400_000) + 1;
         updatedFilter = `-${Math.min(daysSince, days)}d`;
       } else {
         updatedFilter = `-${days}d`;
       }
 
-      const jqlQueries = [
-        `project = Z10 AND updated >= "${updatedFilter}" ORDER BY updated DESC`,
-        `project = Z10LMC AND updated >= "${updatedFilter}" ORDER BY updated DESC`,
-      ];
-
-      // Fetch both project ticket lists in parallel
+      // One JQL query per selected project — all run in parallel
       const allIssueKeys: string[] = [];
       await Promise.allSettled(
-        jqlQueries.map(async (jql) => {
+        (projects as string[]).map(async (projectKey) => {
+          const jql = `project = ${projectKey} AND updated >= "${updatedFilter}" ORDER BY updated DESC`;
           try {
             const url = new URL(`${jiraConfig!.instanceUrl}/rest/api/3/search/jql`);
             url.searchParams.append("jql", jql);
@@ -1124,64 +1446,158 @@ app.post(
               method: "GET",
               headers: { Authorization: authHeader, "Content-Type": "application/json" },
             });
-            if (!searchRes.ok) {
-              console.warn(`[AUTO-DISCOVER] JQL failed: ${jql}`);
-              return;
-            }
+            if (!searchRes.ok) { console.warn(`[AUTO-DISCOVER] JQL failed: ${jql}`); return; }
             const data = (await searchRes.json()) as { issues?: Array<{ key: string }> };
-            const keys = (data.issues || []).map((i) => i.key);
-            allIssueKeys.push(...keys);
+            allIssueKeys.push(...(data.issues || []).map((i) => i.key));
           } catch (e) {
             console.error("[AUTO-DISCOVER] JQL error:", e);
           }
         })
       );
 
-      // Deduplicate keys (a ticket could appear in both queries theoretically)
       const uniqueKeys = [...new Set(allIssueKeys)];
-      console.log(`[AUTO-DISCOVER] Scanning ${uniqueKeys.length} tickets (window: ${updatedFilter})`);
+      console.log(`[AUTO-DISCOVER] Scanning ${uniqueKeys.length} tickets across [${projects.join(", ")}] (window: ${updatedFilter})`);
 
       const results: Array<{
         issueKey: string;
         commentId: string;
         commentBody: string;
         author: string;
+        authorAccountId: string;
         created: string;
-        direction: "to-zlmc" | "to-z10";
+        direction: string;
         mentions: string[];
+        authorizedToPost: boolean;
+        boardId: number | null;
+        boardName: string;
+        attachmentCount: number;
+        attachments: Array<{ name: string; url: string | null }>;
+        externalLinkCount: number;
+        externalLinks: string[];
+        commentBodyHtml: string;
       }> = [];
 
-      // Fetch comments for all tickets in parallel (10 at a time)
+      const projectSet = new Set((projects as string[]).map((p: string) => p.toUpperCase()));
+
+      // Fetch comments + issuelinks for all tickets in parallel (10 at a time)
       await runConcurrent(
         uniqueKeys,
         async (key) => {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment`);
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,issuelinks,sprint,attachment`);
           if (!commentsRes.ok) return;
           const data = await commentsRes.json();
+
+          // Resolve the clone-linked ticket for this issue
+          const links: Array<{
+            type?: { name?: string; inward?: string; outward?: string };
+            outwardIssue?: { key: string };
+            inwardIssue?: { key: string };
+          }> = data.fields?.issuelinks || [];
+
+          const cloneLink = links.find(
+            (l) =>
+              l.type?.name === "Cloners" ||
+              l.type?.inward === "is cloned by" ||
+              l.type?.outward === "clones"
+          );
+          const linkedKey = cloneLink?.outwardIssue?.key || cloneLink?.inwardIssue?.key;
+
+          // Skip if no clone link or linked project is not in the user's selected list
+          if (!linkedKey) return;
+          const linkedProject = linkedKey.split("-")[0].toUpperCase();
+          if (!projectSet.has(linkedProject)) return;
+
+          const sourceProject = key.split("-")[0];
+          const targetProject = linkedKey.split("-")[0];
+
+          const sprintField = data.fields?.sprint as { boardId?: number; name?: string } | null | undefined;
+          const issueBoardId: number | null = sprintField?.boardId ?? null;
+          const issueBoardName: string = (issueBoardId !== null ? boardNameMap.get(issueBoardId) : undefined) ?? sprintField?.name ?? "";
+          const issueAttachments: Array<{ id: string; filename: string; content: string; created: string }> = data.fields?.attachment || [];
+          // filename (lowercase) → attachment, for exact-match lookup
+          const filenameToAtt = new Map(issueAttachments.map((a) => [a.filename.toLowerCase(), a]));
+          // sorted by proximity — used as fallback when __fileName not in ADF
+          const attSortedByProximity = (commentCreatedMs: number) =>
+            [...issueAttachments].sort(
+              (a, b) =>
+                Math.abs(new Date(a.created).getTime() - commentCreatedMs) -
+                Math.abs(new Date(b.created).getTime() - commentCreatedMs)
+            );
           const comments: Array<{
             id: string;
             body: unknown;
-            author?: { displayName?: string };
+            author?: { displayName?: string; accountId?: string };
             created: string;
           }> = data.fields?.comment?.comments || [];
 
           for (const c of comments) {
             const text = extractADFText(c.body);
-            const isToZLMC = /#updateforzlmc/i.test(text);
-            const isToZ10 = /#updateforz10/i.test(text);
-            if (!isToZLMC && !isToZ10) continue;
-
-            // Skip only comments that have already been synced
+            if (!/#update\b/i.test(text)) continue;
             if (isAlreadySynced(key, c.id)) continue;
 
+            const authorAccountId = c.author?.accountId ?? "";
+            const isAuthor = !!authorAccountId && authorAccountId === currentUserAccountId;
+            let authorizedToPost = false;
+            if (currentUserAccountId) {
+              if (isAuthor) {
+                // Authors can always post their own comments
+                authorizedToPost = true;
+              } else if (boardAdminMap.size === 0) {
+                // Agile API unavailable — allow all (graceful fallback)
+                authorizedToPost = true;
+              } else if (issueBoardId !== null) {
+                const boardAdmins = boardAdminMap.get(issueBoardId);
+                authorizedToPost = boardAdmins?.has(currentUserAccountId) ?? false;
+              }
+              // else: ticket not in a sprint → not authorized
+            }
+
+            const mediaInfo = extractCommentMediaInfo(c.body);
+            // ADF media nodes give the EXACT count of attachments in this comment.
+            // Match each node to a real issue attachment: exact filename first, then
+            // closest-by-timestamp fallback. Build /secure/attachment/ URL (opens in
+            // tab, no forced download) instead of the REST content URL.
+            const commentMs = new Date(c.created).getTime();
+            const usedIds = new Set<string>();
+            const commentAttachments = mediaInfo.attachments.map((adfAtt) => {
+              // 1. Try exact filename match (__fileName from ADF attrs)
+              const exact = filenameToAtt.get(adfAtt.name.toLowerCase());
+              if (exact && !usedIds.has(exact.id)) {
+                usedIds.add(exact.id);
+                return {
+                  name: exact.filename,
+                  url: `${jiraConfig!.instanceUrl}/secure/attachment/${exact.id}/${encodeURIComponent(exact.filename)}`,
+                };
+              }
+              // 2. Fall back: closest unused attachment by timestamp
+              for (const att of attSortedByProximity(commentMs)) {
+                if (!usedIds.has(att.id)) {
+                  usedIds.add(att.id);
+                  return {
+                    name: att.filename,
+                    url: `${jiraConfig!.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
+                  };
+                }
+              }
+              return { name: adfAtt.name, url: null };
+            });
             results.push({
               issueKey: key,
               commentId: c.id,
               commentBody: text,
               author: c.author?.displayName || "Unknown",
+              authorAccountId,
               created: c.created,
-              direction: isToZLMC ? "to-zlmc" : "to-z10",
+              direction: `${sourceProject} → ${targetProject}`,
               mentions: extractMentions(c.body),
+              authorizedToPost,
+              boardId: issueBoardId,
+              boardName: issueBoardName,
+              attachmentCount: commentAttachments.length,
+              attachments: commentAttachments,
+              externalLinkCount: mediaInfo.links.length,
+              externalLinks: mediaInfo.links,
+              commentBodyHtml: extractADFHtml(c.body),
             });
           }
         },
@@ -1219,7 +1635,7 @@ app.post(
         commentBody: string;
         author: string;
         created: string;
-        direction: "to-zlmc" | "to-z10";
+        direction: string;
         mentions: string[];
       }> = [];
 
@@ -1237,10 +1653,7 @@ app.post(
 
           for (const c of comments) {
             const text = extractADFText(c.body);
-            const isToZLMC = /#updateforzlmc/i.test(text);
-            const isToZ10 = /#updateforz10/i.test(text);
-            console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | toZLMC=${isToZLMC} toZ10=${isToZ10}`);
-            if (!isToZLMC && !isToZ10) continue;
+            if (!/#update\b/i.test(text)) continue;
 
             // Skip only comments that have already been synced
             if (isAlreadySynced(key, c.id)) {
@@ -1254,7 +1667,7 @@ app.post(
               commentBody: text,
               author: c.author?.displayName || "Unknown",
               created: c.created,
-              direction: isToZLMC ? "to-zlmc" : "to-z10",
+              direction: key.split("-")[0],
               mentions: extractMentions(c.body),
             });
           }

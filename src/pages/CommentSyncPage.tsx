@@ -15,18 +15,12 @@ import {
   AlertCircle,
   Radio,
   ChevronRight,
+  Paperclip,
+  Link,
 } from "lucide-react";
 import { useCommentSync, type PendingComment, type SyncRecord } from "@/hooks/useCommentSync";
-
-const DIRECTION_LABEL: Record<string, string> = {
-  "to-zlmc": "Z10 → ZLMC",
-  "to-z10": "ZLMC → Z10",
-};
-
-const DIRECTION_TAG: Record<string, string> = {
-  "to-zlmc": "#updateforzlmc",
-  "to-z10": "#updateforz10",
-};
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
+import { useJiraConfig } from "@/hooks/use-jira-config";
 
 /** How often to auto-discover (ms) */
 const AUTO_POLL_INTERVAL = 30_000;
@@ -60,6 +54,11 @@ const CommentSyncPage = () => {
     fetchSyncHistory,
     fetchCurrentUser,
   } = useCommentSync();
+  const { selectedProjects } = useSelectedProjects();
+  const { config: jiraConfig } = useJiraConfig();
+
+  const ticketUrl = (key: string) =>
+    jiraConfig?.instanceUrl ? `${jiraConfig.instanceUrl}/browse/${key}` : null;
 
   const [issueKeysInput, setIssueKeysInput] = useState("");
   const [expandedCommentId, setExpandedCommentId] = useState<string | null>(null);
@@ -76,21 +75,41 @@ const CommentSyncPage = () => {
   const isFirstRunRef = useRef(true);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
   const [mentionFilterEnabled, setMentionFilterEnabled] = useState(true);
+  const [summaries, setSummaries] = useState<Record<string, string>>({});
+  const [summarizingId, setSummarizingId] = useState<string | null>(null);
+  const [summarizeError, setSummarizeError] = useState<string | null>(null);
+
+  const handleSummarize = async (uid: string, text: string) => {
+    setSummarizingId(uid);
+    setSummarizeError(null);
+    try {
+      const res = await fetch("/api/ai/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Summarize failed");
+      setSummaries((prev) => ({ ...prev, [uid]: data.summary }));
+    } catch (e) {
+      setSummarizeError(e instanceof Error ? e.message : "Summarize failed");
+    } finally {
+      setSummarizingId(null);
+    }
+  };
 
   const runAutoDiscover = useCallback(async () => {
     try {
-      // First run: scan last 7 days to catch anything pending.
-      // Subsequent polls: 1-day window — server's lastSyncedAt handles precision dedup.
       const days = isFirstRunRef.current ? 7 : 1;
       isFirstRunRef.current = false;
-      await autoDiscover(days, 200);
+      await autoDiscover(days, 200, selectedProjects);
       setLastChecked(new Date());
       nextPollRef.current = Date.now() + AUTO_POLL_INTERVAL;
       setCountdown(AUTO_POLL_INTERVAL / 1000);
     } catch {
       // error shown via hook
     }
-  }, [autoDiscover]);
+  }, [autoDiscover, selectedProjects]);
 
   // Initial load
   useEffect(() => {
@@ -143,9 +162,9 @@ const CommentSyncPage = () => {
   const handleSyncAll = async () => {
     setSyncAllSummary(null);
     try {
-      const summary = await syncAll(visibleComments);
+      const summary = await syncAll(visibleComments.filter((c) => c.authorizedToPost));
       setSyncAllSummary(
-        `Done — ${summary.succeeded} synced, ${summary.skipped} skipped (already done), ${summary.failed} failed`
+        `Done — ${summary.succeeded} posted, ${summary.skipped} skipped (already done), ${summary.failed} failed`
       );
     } catch {
       // error shown via hook state
@@ -160,32 +179,44 @@ const CommentSyncPage = () => {
    * as plain text after ADF extraction).
    */
   function renderWithMentions(text: string, mentions: string[]) {
-    if (!mentions.length) return <>{text}</>;
-    // Build a regex that matches any of the known mention names
+    const lines = text.split("\n");
+    if (!mentions.length) {
+      return <>{lines.map((line, i) => <span key={i}>{i > 0 && <br />}{line}</span>)}</>;
+    }
     const escaped = mentions.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
     const pattern = new RegExp(`(@(?:${escaped.join("|")})\\b)`, "gi");
-    const parts = text.split(pattern);
     return (
       <>
-        {parts.map((part, i) =>
-          pattern.test(part) ? (
-            <span key={i} className="inline-flex items-center rounded-full bg-primary/15 text-primary px-1.5 py-0 font-semibold">
-              {part}
+        {lines.map((line, li) => {
+          const parts = line.split(pattern);
+          return (
+            <span key={li}>
+              {li > 0 && <br />}
+              {parts.map((part, i) =>
+                pattern.test(part) ? (
+                  <span key={i} className="inline-flex items-center rounded-full bg-primary/15 text-primary px-1.5 py-0 font-semibold">
+                    {part}
+                  </span>
+                ) : (
+                  <span key={i}>{part}</span>
+                )
+              )}
             </span>
-          ) : (
-            <span key={i}>{part}</span>
-          )
-        )}
+          );
+        })}
       </>
     );
   }
   // Filter pending comments: if mention filter is on, show only comments that
   // mention the currently logged-in user (or untagged comments if no user resolved yet).
-  const visibleComments = mentionFilterEnabled && currentUserName
+  const visibleComments = (mentionFilterEnabled && currentUserName
     ? pendingComments.filter(
-        (c) => c.mentions.some((m) => m.toLowerCase() === currentUserName.toLowerCase())
+        (c) =>
+          c.mentions.length === 0 ||
+          c.mentions.some((m) => m.toLowerCase() === currentUserName.toLowerCase())
       )
-    : pendingComments;
+    : pendingComments
+  ).slice().sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
 
   return (
     <DashboardLayout>
@@ -195,9 +226,7 @@ const CommentSyncPage = () => {
           <div>
             <h1 className="text-2xl font-bold text-foreground">Comment Sync</h1>
             <p className="text-sm text-muted-foreground mt-1">
-              AI-powered bi-directional comment sync between{" "}
-              <span className="font-semibold text-primary">Z10</span> and{" "}
-              <span className="font-semibold text-primary">ZLMC</span> boards
+              Review and post cross-project updates for your sprint boards
             </p>
           </div>
           {/* Live monitor badge */}
@@ -237,12 +266,14 @@ const CommentSyncPage = () => {
             <Sparkles className="h-4 w-4 text-primary" /> How it works
           </p>
           <p>
-            Add <code className="bg-muted px-1 rounded font-mono text-primary">#updateforzlmc</code> in a Z10 comment → AI rewrites it client-friendly → auto-appears here for sync to the linked ZLMC ticket.
+            Dev tags <code className="bg-muted px-1 rounded font-mono text-primary">#update</code> <code className="bg-muted px-1 rounded font-mono text-primary">@BoardAdmin</code> on any ticket with a <strong>clone link</strong> → it appears here → <strong>Post</strong> copies the comment to the linked ticket — formatting, inline images, video links and file attachments included — notifying the destination reporter.
           </p>
-          <p>
-            Add <code className="bg-muted px-1 rounded font-mono text-primary">#updateforz10</code> in a ZLMC comment → AI preserves full detail → auto-appears here for sync to the linked Z10 ticket.
-          </p>
-          <p className="text-muted-foreground/70">Both boards are scanned automatically every {AUTO_POLL_INTERVAL / 1000}s. You can also scan specific tickets manually below.</p>
+          {selectedProjects.length === 0 && (
+            <p className="text-warning font-medium">⚠ No projects selected. Go to Settings → select projects to enable auto-scan.</p>
+          )}
+          {selectedProjects.length > 0 && (
+            <p className="text-muted-foreground/70">Scanning <span className="font-semibold text-foreground">[{selectedProjects.join(", ")}]</span> every {AUTO_POLL_INTERVAL / 1000}s. You can also scan specific tickets manually below.</p>
+          )}
         </div>
 
         {/* Stats */}
@@ -356,7 +387,7 @@ const CommentSyncPage = () => {
               }`}
               title={mentionFilterEnabled ? "Showing only comments mentioning you — click to show all" : "Click to show only comments mentioning you"}
             >
-              @{currentUserName.split(" ")[0]} only
+              Tagged for me
               {mentionFilterEnabled ? " ✓" : ""}
             </button>
             {mentionFilterEnabled && pendingComments.length > visibleComments.length && (
@@ -373,7 +404,7 @@ const CommentSyncPage = () => {
               <div className="flex items-center gap-2">
                 <MessageSquare className="h-4 w-4 text-warning" />
                 <span className="text-xs font-semibold text-foreground uppercase tracking-wide">
-                  Pending Synchronization ({visibleComments.length})
+                  Awaiting Your Review ({visibleComments.length})
                 </span>
               </div>
               <button
@@ -382,7 +413,7 @@ const CommentSyncPage = () => {
                 className="inline-flex items-center gap-1.5 rounded border border-border bg-primary text-primary-foreground px-3 py-1.5 text-xs font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSyncingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
-                {isSyncingAll ? "Syncing All…" : `Sync All (${visibleComments.length})`}
+                {isSyncingAll ? "Posting All…" : `Post All (${visibleComments.filter(c => c.authorizedToPost).length})`}
               </button>
             </div>
 
@@ -417,7 +448,11 @@ const CommentSyncPage = () => {
                         key={uid}
                         className="border-b border-border hover:bg-muted/30 transition-colors"
                       >
-                        <td className="py-3 px-4 font-mono font-semibold text-primary">{comment.issueKey}</td>
+                        <td className="py-3 px-4 font-mono font-semibold text-primary">
+                          {ticketUrl(comment.issueKey) ? (
+                            <a href={ticketUrl(comment.issueKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{comment.issueKey}</a>
+                          ) : comment.issueKey}
+                        </td>
                         <td className="py-3 px-4 text-foreground">{comment.author}</td>
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">
                           <span className="flex items-center gap-1">
@@ -428,53 +463,127 @@ const CommentSyncPage = () => {
                         <td className="py-3 px-4">
                           <span className="inline-flex items-center gap-1 text-muted-foreground">
                             <ArrowRight className="h-3 w-3" />
-                            {DIRECTION_LABEL[comment.direction]}
+                            {comment.direction}
                           </span>
                         </td>
                         <td className="py-3 px-4">
                           <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-primary">
-                            {DIRECTION_TAG[comment.direction]}
+                            #update
                           </code>
                         </td>
                         <td className="py-3 px-4 text-muted-foreground max-w-[220px] truncate">
+                          {(comment.attachmentCount > 0 || comment.externalLinkCount > 0) && (
+                            <div className="flex items-center gap-2 mb-1">
+                              {comment.attachmentCount > 0 && (
+                                <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70" title={comment.attachments.map(a => a.name).join(", ")}>
+                                  <Paperclip className="h-3 w-3" />
+                                  {comment.attachmentCount} attachment{comment.attachmentCount !== 1 ? "s" : ""}
+                                </span>
+                              )}
+                              {comment.externalLinkCount > 0 && (
+                                <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70" title={comment.externalLinks.join("\n")}>
+                                  <Link className="h-3 w-3" />
+                                  {comment.externalLinkCount} link{comment.externalLinkCount !== 1 ? "s" : ""}
+                                </span>
+                              )}
+                            </div>
+                          )}
                           <button
                             onClick={() => setExpandedCommentId(isExpanded ? null : uid)}
                             className="flex items-center gap-1 hover:text-foreground text-left"
                             title={isExpanded ? "Collapse" : "Preview comment"}
                           >
                             <span className="truncate max-w-[180px] flex items-center gap-0.5 flex-wrap">
-                              {renderWithMentions(comment.commentBody.slice(0, 120), comment.mentions)}
+                              {renderWithMentions(comment.commentBody.replace(/\n+/g, " ").slice(0, 120), comment.mentions)}
                             </span>
                             {isExpanded ? <ChevronUp className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
                           </button>
                         </td>
                         <td className="py-3 px-4 text-center">
-                          <button
-                            onClick={() => handleSync(comment)}
-                            disabled={isSyncingThis || isDone}
-                            className="inline-flex items-center gap-1.5 rounded border border-border bg-card px-3 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {isSyncingThis ? (
-                              <><Loader2 className="h-3 w-3 animate-spin" /> Syncing…</>
-                            ) : isDone ? (
-                              <><Check className="h-3 w-3 text-success" /> Synced</>
-                            ) : (
-                              <><Sparkles className="h-3 w-3 text-primary" /> Sync Now</>
-                            )}
-                          </button>
+                          {!comment.authorizedToPost && !isDone && !isSyncingThis ? (
+                            <span className="text-muted-foreground/60 text-[10px] flex items-center justify-center gap-1">
+                              ⊘ {comment.boardName || "cross-board"}
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleSync(comment)}
+                              disabled={isSyncingThis || isDone || !comment.authorizedToPost}
+                              className="inline-flex items-center gap-1.5 rounded border border-border bg-card px-3 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {isSyncingThis ? (
+                                <><Loader2 className="h-3 w-3 animate-spin" /> Posting…</>
+                              ) : isDone ? (
+                                <><Check className="h-3 w-3 text-success" /> Posted</>
+                              ) : (
+                                <><Sparkles className="h-3 w-3 text-primary" /> Post</>
+                              )}
+                            </button>
+                          )}
                         </td>
                       </tr>
                       {isExpanded && (
                         <tr key={`${uid}-expanded`} className="border-b border-border bg-muted/20">
-                          <td colSpan={7} className="px-4 py-3">
-                            <div className="rounded border border-border bg-muted/40 px-3 py-2 text-xs text-foreground whitespace-pre-wrap font-mono leading-relaxed">
-                              {renderWithMentions(comment.commentBody, comment.mentions)}
+                          <td colSpan={7} className="px-4 py-3 space-y-2">
+                            {/* Comment body — full ADF formatting preserved */}
+                            <div
+                              className="adf-body rounded border border-border bg-muted/40 px-3 py-2 text-xs text-foreground leading-relaxed"
+                              dangerouslySetInnerHTML={{ __html: comment.commentBodyHtml || comment.commentBody }}
+                            />
+
+                            {/* Summarize button + summary output */}
+                            <div className="flex items-start gap-2 flex-wrap">
+                              <button
+                                onClick={() => handleSummarize(uid, comment.commentBody)}
+                                disabled={summarizingId === uid}
+                                className="inline-flex items-center gap-1.5 rounded border border-border bg-card px-2.5 py-1 text-[10px] font-semibold hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                {summarizingId === uid
+                                  ? <><Loader2 className="h-3 w-3 animate-spin" /> Summarizing…</>
+                                  : <><Sparkles className="h-3 w-3 text-primary" /> Summarize with AI</>}
+                              </button>
+                              {summarizeError && summarizingId === null && (
+                                <span className="text-[10px] text-destructive" title={summarizeError}>
+                                  {summarizeError.includes("GEMINI_API_KEY")
+                                    ? "⚠ Gemini API key not configured — add GEMINI_API_KEY to your environment"
+                                    : `⚠ ${summarizeError}`}
+                                </span>
+                              )}
                             </div>
-                            {comment.mentions.length > 0 && (
-                              <div className="mt-1.5 flex items-center gap-1 flex-wrap">
-                                <span className="text-[10px] text-muted-foreground">Tagged:</span>
-                                {comment.mentions.map((m) => (
-                                  <span key={m} className="inline-flex items-center rounded-full bg-primary/15 text-primary px-1.5 py-0 text-[10px] font-semibold">@{m}</span>
+                            {summaries[uid] && (
+                              <div className="rounded border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-foreground">
+                                <span className="text-[10px] font-semibold text-primary uppercase tracking-wide flex items-center gap-1 mb-1">
+                                  <Sparkles className="h-3 w-3" /> AI Summary
+                                </span>
+                                {summaries[uid]}
+                              </div>
+                            )}
+
+                            {/* Attachments */}
+                            {comment.attachmentCount > 0 && (
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <Paperclip className="h-3 w-3 text-muted-foreground/70 shrink-0" />
+                                {comment.attachments.map(({ name, url }, i) =>
+                                  url ? (
+                                    <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                                      className="inline-flex items-center rounded bg-muted px-1.5 py-0 text-[10px] text-primary font-mono hover:underline">
+                                      {name}
+                                    </a>
+                                  ) : (
+                                    <span key={i} className="inline-flex items-center rounded bg-muted px-1.5 py-0 text-[10px] text-muted-foreground font-mono">{name}</span>
+                                  )
+                                )}
+                              </div>
+                            )}
+
+                            {/* External links */}
+                            {comment.externalLinkCount > 0 && (
+                              <div className="flex items-start gap-1 flex-wrap">
+                                <Link className="h-3 w-3 text-muted-foreground/70 shrink-0 mt-0.5" />
+                                {comment.externalLinks.map((url) => (
+                                  <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                                    className="inline-flex items-center rounded bg-muted px-1.5 py-0 text-[10px] text-primary font-mono hover:underline max-w-[280px] truncate">
+                                    {url}
+                                  </a>
                                 ))}
                               </div>
                             )}
@@ -527,7 +636,7 @@ const CommentSyncPage = () => {
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Direction</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Target</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Author</th>
-                      <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">AI Output (preview)</th>
+                      <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Comment Preview</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Time</th>
                       <th className="text-center py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
                     </tr>
@@ -538,20 +647,28 @@ const CommentSyncPage = () => {
                         key={record.id}
                         className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
                       >
-                        <td className="py-3 px-4 font-mono text-primary">{record.sourceKey}</td>
+                        <td className="py-3 px-4 font-mono text-primary">
+                          {ticketUrl(record.sourceKey) ? (
+                            <a href={ticketUrl(record.sourceKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{record.sourceKey}</a>
+                          ) : record.sourceKey}
+                        </td>
                         <td className="py-3 px-4">
                           <span className="inline-flex items-center gap-1 text-muted-foreground">
                             <ArrowRight className="h-3 w-3" />
-                            {DIRECTION_LABEL[record.direction]}
+                            {record.direction}
                           </span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-primary">{record.targetKey}</td>
+                        <td className="py-3 px-4 font-mono text-primary">
+                          {ticketUrl(record.targetKey) ? (
+                            <a href={ticketUrl(record.targetKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{record.targetKey}</a>
+                          ) : record.targetKey}
+                        </td>
                         <td className="py-3 px-4 text-muted-foreground">{record.author}</td>
                         <td className="py-3 px-4 text-muted-foreground max-w-[280px] truncate">{record.transformedComment}</td>
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">{formatRelative(record.timestamp)}</td>
                         <td className="py-3 px-4 text-center">
                           {record.status === "success" ? (
-                            <span className="inline-flex items-center gap-1 text-success"><Check className="h-3 w-3" /> Synced</span>
+                            <span className="inline-flex items-center gap-1 text-success"><Check className="h-3 w-3" /> Posted</span>
                           ) : (
                             <span className="inline-flex items-center gap-1 text-destructive" title={record.error}><X className="h-3 w-3" /> Failed</span>
                           )}
