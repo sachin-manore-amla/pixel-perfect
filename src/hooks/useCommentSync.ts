@@ -2,23 +2,11 @@ import { useState, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
-/** Safe JSON parser — returns null instead of throwing on empty/invalid body */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function safeJson(res: Response): Promise<any> {
-  try {
-    const text = await res.text();
-    if (!text || !text.trim()) return {};
-    return JSON.parse(text);
-  } catch {
-    return {};
-  }
-}
-
 export interface SyncRecord {
   id: string;
   sourceKey: string;
   targetKey: string;
-  direction: string; // e.g. "Z10 → Z10LMC"
+  direction: "to-zlmc" | "to-z10";
   commentId: string;
   originalComment: string;
   transformedComment: string;
@@ -33,18 +21,9 @@ export interface PendingComment {
   commentId: string;
   commentBody: string;
   author: string;
-  authorAccountId: string;
   created: string;
-  direction: string;
+  direction: "to-zlmc" | "to-z10";
   mentions: string[];
-  authorizedToPost: boolean;
-  boardId: number | null;
-  boardName: string;
-  attachmentCount: number;
-  attachments: Array<{ name: string; url: string | null }>;
-  externalLinkCount: number;
-  externalLinks: string[];
-  commentBodyHtml: string;
 }
 
 export interface SyncAllSummary {
@@ -80,8 +59,9 @@ export function useCommentSync() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ issueKey, commentBody, commentId, author }),
         });
-        const data = await safeJson(res);
-        if (!res.ok) throw new Error(String(data.error || "Sync failed"));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Sync failed");
+
         const record: SyncRecord = data.record;
         setSyncHistory((prev) => [record, ...prev]);
         setPendingComments((prev) =>
@@ -117,8 +97,8 @@ export function useCommentSync() {
             })),
           }),
         });
-        const data = await safeJson(res);
-        if (!res.ok) throw new Error(String(data.error || "Bulk sync failed"));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Bulk sync failed");
 
         const summary: SyncAllSummary = data.summary;
         const newRecords: SyncRecord[] = (data.results || [])
@@ -152,7 +132,7 @@ export function useCommentSync() {
    * No manual ticket entry needed.
    */
   const autoDiscover = useCallback(
-    async (days = 7, maxIssues = 50, projects: string[] = []): Promise<PendingComment[]> => {
+    async (days = 7, maxIssues = 50): Promise<PendingComment[]> => {
       setIsDiscovering(true);
       setError(null);
       setScanStats(null);
@@ -160,10 +140,10 @@ export function useCommentSync() {
         const res = await fetch(`${API_BASE}/api/jira/auto-discover`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ days, maxIssues, projects }),
+          body: JSON.stringify({ days, maxIssues }),
         });
-        const data = await safeJson(res);
-        if (!res.ok) throw new Error(String(data.error || "Auto-discover failed"));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Auto-discover failed");
         const results: PendingComment[] = data.results || [];
         setPendingComments(results);
         setScanStats({ scanned: data.scanned || 0, found: results.length });
@@ -194,8 +174,8 @@ export function useCommentSync() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ issueKeys }),
         });
-        const data = await safeJson(res);
-        if (!res.ok) throw new Error(String(data.error || "Poll failed"));
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Poll failed");
         const results: PendingComment[] = data.results || [];
         // Merge: keep existing unsynced comments, add any newly discovered ones
         setPendingComments((prev) => {
@@ -257,4 +237,17 @@ export function useCommentSync() {
     fetchSyncHistory,
     fetchCurrentUser,
   };
+}
+
+export interface SyncRecord {
+  id: string;
+  sourceKey: string;
+  targetKey: string;
+  direction: "to-zlmc" | "to-z10";
+  originalComment: string;
+  transformedComment: string;
+  author: string;
+  timestamp: string;
+  status: "success" | "failed";
+  error?: string;
 }

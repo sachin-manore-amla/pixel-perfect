@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { DashboardLayout } from "@/components/DashboardLayout";
-import { Eye, MessageCircle, Clock, Loader2, ChevronDown, ChevronUp, AlertTriangle, User, ChevronLeft, ChevronRight, FolderOpen } from "lucide-react";
+import { Eye, MessageCircle, Clock, Loader2, ChevronDown, ChevronUp, AlertTriangle, User, ChevronLeft, ChevronRight, FolderOpen, RotateCcw } from "lucide-react";
 import { useTicketsWithAnalysis } from "@/hooks/useTicketsWithAnalysis";
 import { useRecentActivity } from "@/hooks/useRecentActivity";
 import { useUnattendedTickets } from "@/hooks/useUnattendedTickets";
@@ -11,14 +11,41 @@ import { CommentsTimeline } from "@/components/CommentsTimeline";
 import { NewActivityTable } from "@/components/NewActivityTable";
 import { getJiraIssueUrl } from "@/lib/jira";
  
+const P1_DISMISSED_KEY = "p1_attention_dismissed";
+const UNATTENDED_DISMISSED_KEY = "p1_unattended_dismissed";
+
+function getDismissed(key: string): Record<string, number> {
+  try {
+    const s = localStorage.getItem(key);
+    return s ? JSON.parse(s) : {};
+  } catch { return {}; }
+}
+function markDismissed(key: string, ticketKey: string) {
+  try {
+    const d = getDismissed(key);
+    d[ticketKey] = Date.now();
+    localStorage.setItem(key, JSON.stringify(d));
+  } catch {}
+}
+function clearDismissed(key: string) {
+  localStorage.removeItem(key);
+}
+
 const AttentionPage = () => {
-  const [daysWindow, setDaysWindow] = useState<1 | 15 | 30>(30);
+  const [daysWindow, setDaysWindow] = useState<1 | 15 | 30>(1);
   const [expandedTicket, setExpandedTicket] = useState<string | null>(null);
   const [p1Page, setP1Page] = useState(1);
   const P1_PAGE_SIZE = 5;
   const [unattendedPage, setUnattendedPage] = useState(1);
   const UNATTENDED_PAGE_SIZE = 10;
   const [visibleNewActivityCount, setVisibleNewActivityCount] = useState(0);
+  const [p1Dismissed, setP1Dismissed] = useState<Record<string, number>>({});
+  const [unattendedDismissed, setUnattendedDismissed] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    setP1Dismissed(getDismissed(P1_DISMISSED_KEY));
+    setUnattendedDismissed(getDismissed(UNATTENDED_DISMISSED_KEY));
+  }, []);
   const { config: jiraConfig } = useJiraConfig();
   const { data: currentJiraUser } = useCurrentJiraUser();
   const currentUserDisplayName = currentJiraUser?.displayName;
@@ -26,12 +53,12 @@ const AttentionPage = () => {
   const { data: analysisData, isLoading, error } = useTicketsWithAnalysis(daysWindow, selectedProjects, currentJiraUser ?? undefined);
   const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1, currentUserDisplayName, selectedProjects);
   const { data: unattendedData, isLoading: unattendedLoading } = useUnattendedTickets(daysWindow * 24, selectedProjects, currentJiraUser ?? undefined);
-  const attentionRequired = analysisData?.attentionRequired || [];
-  const attentionCount = analysisData?.attentionCount || 0;
+  const attentionRequired = (analysisData?.attentionRequired || []).filter(t => !p1Dismissed[t.ticketKey]);
+  const attentionCount = attentionRequired.length;
   const p1TotalPages = Math.ceil(attentionRequired.length / P1_PAGE_SIZE);
   const p1PagedTickets = attentionRequired.slice((p1Page - 1) * P1_PAGE_SIZE, p1Page * P1_PAGE_SIZE);
   const recentActivity = recentActivityData || [];
-  const unattendedTickets = unattendedData || [];
+  const unattendedTickets = (unattendedData || []).filter(t => !unattendedDismissed[t.ticketKey]);
   const unattendedTotalPages = Math.ceil(unattendedTickets.length / UNATTENDED_PAGE_SIZE);
   const unattendedPagedTickets = unattendedTickets.slice((unattendedPage - 1) * UNATTENDED_PAGE_SIZE, unattendedPage * UNATTENDED_PAGE_SIZE);
  
@@ -193,9 +220,19 @@ const AttentionPage = () => {
           <div className="flex items-center justify-between mb-3">
             <div>
               <h2 className="text-sm font-semibold text-foreground uppercase tracking-wide">P1 Tickets Needing Attention</h2>
-              <p className="text-xs text-muted-foreground mt-1">{getWindowLabel()}</p>
+              <p className="text-xs text-muted-foreground mt-1">{getWindowLabel()} • Click ticket key to open &amp; dismiss</p>
             </div>
-            {isLoading && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+            <div className="flex items-center gap-2">
+              {Object.keys(p1Dismissed).length > 0 && (
+                <button
+                  onClick={() => { clearDismissed(P1_DISMISSED_KEY); setP1Dismissed({}); setP1Page(1); }}
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded px-2 py-1"
+                >
+                  <RotateCcw className="h-3 w-3" /> Reset ({Object.keys(p1Dismissed).length} hidden)
+                </button>
+              )}
+              {isLoading && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+            </div>
           </div>
           {attentionRequired.length === 0 ? (
             <p className="text-sm text-muted-foreground">No tickets requiring attention at this time.</p>
@@ -219,6 +256,12 @@ const AttentionPage = () => {
                             target="_blank"
                             rel="noopener noreferrer"
                             className="font-mono text-sm font-semibold text-primary hover:underline"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              markDismissed(P1_DISMISSED_KEY, ticket.ticketKey);
+                              setP1Dismissed(prev => ({ ...prev, [ticket.ticketKey]: Date.now() }));
+                              setExpandedTicket(null);
+                            }}
                           >
                             {ticket.ticketKey}
                           </a>
@@ -331,9 +374,19 @@ const AttentionPage = () => {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">P1 Unattended Tickets</h2>
-              <p className="text-sm text-muted-foreground mt-1">Active P1 tickets with no response in {getWindowLabel().toLowerCase()}</p>
+              <p className="text-sm text-muted-foreground mt-1">Active P1 tickets with no response in {getWindowLabel().toLowerCase()} • Click ticket key to open &amp; dismiss</p>
             </div>
-            {unattendedLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
+            <div className="flex items-center gap-2">
+              {Object.keys(unattendedDismissed).length > 0 && (
+                <button
+                  onClick={() => { clearDismissed(UNATTENDED_DISMISSED_KEY); setUnattendedDismissed({}); setUnattendedPage(1); }}
+                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded px-2 py-1"
+                >
+                  <RotateCcw className="h-3 w-3" /> Reset ({Object.keys(unattendedDismissed).length} hidden)
+                </button>
+              )}
+              {unattendedLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
+            </div>
           </div>
 
           {unattendedLoading ? (
@@ -359,13 +412,20 @@ const AttentionPage = () => {
                 </thead>
                 <tbody>
                   {unattendedPagedTickets.map((t) => (
-                    <tr key={t.ticketKey} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
+                    <tr
+                      key={t.ticketKey}
+                      className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
+                    >
                       <td className="py-3 px-4">
                         <a
                           href={getJiraIssueUrl(t.ticketKey)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="font-mono text-primary font-semibold hover:underline"
+                          onClick={() => {
+                            markDismissed(UNATTENDED_DISMISSED_KEY, t.ticketKey);
+                            setUnattendedDismissed(prev => ({ ...prev, [t.ticketKey]: Date.now() }));
+                          }}
                         >
                           {t.ticketKey}
                         </a>

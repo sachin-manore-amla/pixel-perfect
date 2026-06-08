@@ -54,29 +54,42 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
       ? `project = ${selectedProjects[0]}`
       : `project IN (${selectedProjects.join(", ")})`;
 
-    // Step 1: Fetch P1 tickets with broader status filtering (original curl approach)
+    // Step 1: Fetch P1 tickets with pagination
     const jql =
-      `${projectFilter} AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
+      `${projectFilter} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
 
-    const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        jql,
-        maxResults: 100,
-        fields: ["summary", "status", "priority", "assignee", "created", "updated"],
-      }),
-    });
+    const PAGE_SIZE = 100;
+    let startAt = 0;
+    let allTickets: JiraTicket[] = [];
+    let totalTickets = Infinity;
 
-    if (!ticketsResponse.ok) {
-      const error = await ticketsResponse.text();
-      throw new Error(`Failed to fetch tickets: ${ticketsResponse.statusText} - ${error}`);
+    while (startAt < totalTickets) {
+      const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jql,
+          maxResults: PAGE_SIZE,
+          startAt,
+          fields: ["summary", "status", "priority", "assignee", "created", "updated"],
+        }),
+      });
+
+      if (!ticketsResponse.ok) {
+        const error = await ticketsResponse.text();
+        throw new Error(`Failed to fetch tickets: ${ticketsResponse.statusText} - ${error}`);
+      }
+
+      const ticketsData = await ticketsResponse.json();
+      const pageTickets: JiraTicket[] = ticketsData.issues || [];
+      totalTickets = ticketsData.total ?? pageTickets.length;
+      allTickets = allTickets.concat(pageTickets);
+      startAt += pageTickets.length;
+      console.log(`[Tickets Service] Fetched ${allTickets.length} / ${totalTickets} P1 tickets...`);
+      if (pageTickets.length < PAGE_SIZE) break;
     }
 
-    const ticketsData = await ticketsResponse.json();
-    const tickets: JiraTicket[] = ticketsData.issues || [];
+    const tickets = allTickets;
     console.log(`[Tickets Service] Found ${tickets.length} P1 tickets total (all active statuses)`);
 
     if (tickets.length === 0) {
@@ -165,7 +178,7 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
       if (currentUser) {
         const lastFewComments = comments.slice(-3);
         isMentionedRecently = lastFewComments.some((c) => {
-          // ADF accountId check
+          // ADF accountId check — check both "id" and "accountId" keys
           if (typeof c.body === "object" && c.body !== null) {
             const bodyStr = JSON.stringify(c.body);
             if (
@@ -173,9 +186,13 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
               bodyStr.includes(`"accountId":"${currentUser.accountId}"`)
             ) return true;
           }
-          // Plain text / extracted text check
+          // Plain text / extracted text check — handle both "@Name" and "Name" variants
           const text = extractCommentText(c.body).toLowerCase();
-          return text.includes(`@${currentUser.displayName.toLowerCase()}`);
+          const nameLower = currentUser.displayName.toLowerCase();
+          if (text.includes(`@${nameLower}`)) return true;
+          // Fallback: check without @ prefix (some Jira ADF mention attrs.text omit @)
+          if (text.includes(nameLower)) return true;
+          return false;
         });
         if (!isMentionedRecently) {
           console.log(`[Tickets Service] ${ticket.key}: currentUser not mentioned in last 3 comments — skipping`);
@@ -201,6 +218,9 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
       }));
 
       let analysis: AnalysisResult;
+      // Always run keyword check in parallel — used as safety net when AI says false
+      const keywordAnalysis = analyzeCommentsForUnanswered(comments);
+
       try {
         const aiResponse = await fetch(`${API_BASE}/api/ai/analyze-comments`, {
           method: "POST",
@@ -215,19 +235,25 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
 
         if (aiResponse.ok) {
           const aiResult = await aiResponse.json();
+          const aiNeedsAttention = aiResult.needsAttention === true;
+          // If user is mentioned AND keyword sees a question/action → trust keyword over AI
+          // This prevents AI from suppressing obvious cases like "What is the status? @User"
+          const combinedNeedsAttention = isMentionedRecently
+            ? aiNeedsAttention || keywordAnalysis.needsAttention
+            : aiNeedsAttention;
           analysis = {
-            needsAttention: aiResult.needsAttention === true,
-            reason: aiResult.reason || "",
-            priority: aiResult.priority || "LOW",
+            needsAttention: combinedNeedsAttention,
+            reason: aiResult.reason || keywordAnalysis.reason || "",
+            priority: aiResult.priority || keywordAnalysis.priority || "LOW",
           };
-          console.log(`[AI] ${ticket.key}: ${analysis.needsAttention ? "⚠️ Needs Attention" : "✅ OK"} — ${analysis.reason}`);
+          console.log(`[AI] ${ticket.key}: AI=${aiNeedsAttention}, Keyword=${keywordAnalysis.needsAttention}, Combined=${combinedNeedsAttention} — ${analysis.reason}`);
         } else {
           console.log(`[AI] ${ticket.key}: OpenAI unavailable, using keyword fallback`);
-          analysis = analyzeCommentsForUnanswered(comments);
+          analysis = keywordAnalysis;
         }
       } catch {
         console.log(`[AI] ${ticket.key}: OpenAI call failed, using keyword fallback`);
-        analysis = analyzeCommentsForUnanswered(comments);
+        analysis = keywordAnalysis;
       }
 
       console.log(
@@ -403,14 +429,13 @@ export async function fetchRecentActivity(daysWindow: number = 1, currentUserDis
 
     // Fetch P1 tickets from selected projects using pagination
     const jql =
-      `${projectFilter} AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
+      `${projectFilter} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;
     let allTickets: JiraTicket[] = [];
     let total = Infinity;
 
-    // Paginate through all results
     while (startAt < total) {
       const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
         method: "POST",
@@ -435,7 +460,7 @@ export async function fetchRecentActivity(daysWindow: number = 1, currentUserDis
 
       console.log(`[Tickets Service] Fetched ${allTickets.length} / ${total} tickets...`);
 
-      if (pageTickets.length < PAGE_SIZE) break; // last page
+      if (pageTickets.length < PAGE_SIZE) break;
     }
 
     const tickets = allTickets;
@@ -589,7 +614,7 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24, select
       : `project IN (${selectedProjects.join(", ")})`;
 
     const jql =
-      `${projectFilter} AND customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
+      `${projectFilter} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;
@@ -600,7 +625,7 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24, select
       const ticketsResponse = await fetch(`${API_BASE}/api/jira/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        body: JSON.stringify({
           jql,
           maxResults: PAGE_SIZE,
           startAt,
@@ -620,8 +645,10 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24, select
       startAt += pageTickets.length;
       console.log(`[Tickets Service] Unattended: fetched ${allTickets.length} / ${total} tickets...`);
       if (pageTickets.length < PAGE_SIZE) break;
-    }    const tickets = allTickets;
-    console.log(`[Tickets Service] Total active P1 tickets: ${tickets.length}`);
+    }
+
+    const tickets = allTickets;
+    console.log(`[Tickets Service] Total active P1 tickets: ${tickets.length}`);;
 
     const now = new Date();
     const thresholdMs = thresholdHours * 60 * 60 * 1000;

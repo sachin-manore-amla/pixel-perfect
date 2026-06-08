@@ -60,7 +60,7 @@ export function useP1Tickets() {
 
     try {
       // JQL query for P1 tickets updated in last 24h
-      const jql = `customfield_10092 ~ "Priority 1" AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) AND updated >= -1d`;
+      const jql = `"Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) AND updated >= -1d`;
 
       console.log("[P1 TICKETS] Fetching with JQL:", jql);
 
