@@ -149,11 +149,11 @@ export function useCommentSync() {
   );
 
   /**
-   * Auto-discover: JQL-scans both Z10 and Z10LMC projects for sync hashtags.
+   * Auto-discover: JQL-scans selected projects for sync hashtags.
    * No manual ticket entry needed.
    */
   const autoDiscover = useCallback(
-    async (days = 7, maxIssues = 50): Promise<PendingComment[]> => {
+    async (days = 1, maxIssues = 200, projectKeys: string[] = []): Promise<PendingComment[]> => {
       setIsDiscovering(true);
       setError(null);
       setScanStats(null);
@@ -161,7 +161,7 @@ export function useCommentSync() {
         const res = await fetch(`${API_BASE}/api/jira/auto-discover`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ days, maxIssues }),
+          body: JSON.stringify({ days, maxIssues, projectKeys }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Auto-discover failed");

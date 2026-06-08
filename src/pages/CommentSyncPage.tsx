@@ -28,8 +28,8 @@ const DIRECTION_LABEL: Record<string, string> = {
 };
 
 const DIRECTION_TAG: Record<string, string> = {
-  "to-zlmc": "#updateforzlmc",
-  "to-z10": "#updateforz10",
+  "to-zlmc": "#update",
+  "to-z10": "#update",
 };
 
 /** How often to auto-discover (ms) */
@@ -77,24 +77,25 @@ const CommentSyncPage = () => {
   const [historyPage, setHistoryPage] = useState(1);
   const HISTORY_PAGE_SIZE = 10;
   const nextPollRef = useRef<number>(Date.now() + AUTO_POLL_INTERVAL);
-  const isFirstRunRef = useRef(true);
   const [currentUserName, setCurrentUserName] = useState<string | null>(null);
-  const [mentionFilterEnabled, setMentionFilterEnabled] = useState(true);
+  const [mentionFilterEnabled, setMentionFilterEnabled] = useState(false);
+
+  const { selectedProjects: selectedProjectKeys } = useSelectedProjects();
+  const { config: jiraConfig } = useJiraConfig();
+  const ticketUrl = (key: string) =>
+    jiraConfig?.instanceUrl ? `${jiraConfig.instanceUrl}/browse/${key}` : null;
 
   const runAutoDiscover = useCallback(async () => {
     try {
-      // First run: scan last 7 days to catch anything pending.
-      // Subsequent polls: 1-day window — server's lastSyncedAt handles precision dedup.
-      const days = isFirstRunRef.current ? 7 : 1;
-      isFirstRunRef.current = false;
-      await autoDiscover(days, 200);
+      // Always use 1-day window — server's persisted lastSyncedAt handles precise dedup.
+      await autoDiscover(1, 200, selectedProjectKeys);
       setLastChecked(new Date());
       nextPollRef.current = Date.now() + AUTO_POLL_INTERVAL;
       setCountdown(AUTO_POLL_INTERVAL / 1000);
     } catch {
       // error shown via hook
     }
-  }, [autoDiscover]);
+  }, [autoDiscover, selectedProjectKeys]);
 
   // Initial load
   useEffect(() => {
@@ -147,9 +148,9 @@ const CommentSyncPage = () => {
   const handleSyncAll = async () => {
     setSyncAllSummary(null);
     try {
-      const summary = await syncAll(visibleComments);
+      const summary = await syncAll(authorizedVisible);
       setSyncAllSummary(
-        `Done — ${summary.succeeded} synced, ${summary.skipped} skipped (already done), ${summary.failed} failed`
+        `Done — ${summary.succeeded} posted, ${summary.skipped} skipped (already done), ${summary.failed} failed`
       );
     } catch {
       // error shown via hook state
@@ -183,13 +184,19 @@ const CommentSyncPage = () => {
       </>
     );
   }
-  // Filter pending comments: if mention filter is on, show only comments that
-  // mention the currently logged-in user (or untagged comments if no user resolved yet).
-  const visibleComments = mentionFilterEnabled && currentUserName
-    ? pendingComments.filter(
-        (c) => c.mentions.some((m) => m.toLowerCase() === currentUserName.toLowerCase())
-      )
-    : pendingComments;
+  // Base visibility: board admins see all board comments; @mentioned people see their comments.
+  // Toggle narrows board-admins to only their @mentions.
+  const visibleComments = (
+    pendingComments.filter((c) => {
+      const isMentioned = currentUserName
+        ? c.mentions.some((m) => m.toLowerCase() === currentUserName.toLowerCase())
+        : false;
+      if (mentionFilterEnabled) return isMentioned;
+      return c.authorizedToPost || isMentioned;
+    })
+  ).slice().sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
+
+  const authorizedVisible = visibleComments.filter((c) => c.authorizedToPost);
 
   return (
     <DashboardLayout>
@@ -199,9 +206,7 @@ const CommentSyncPage = () => {
           <div>
             <h1 className="text-2xl font-bold text-foreground">Comment Sync</h1>
             <p className="text-sm text-muted-foreground mt-1">
-              AI-powered bi-directional comment sync between{" "}
-              <span className="font-semibold text-primary">Z10</span> and{" "}
-              <span className="font-semibold text-primary">ZLMC</span> boards
+              Cross-project comment sync — works across any linked Jira projects
             </p>
           </div>
           {/* Live monitor badge */}
@@ -236,17 +241,20 @@ const CommentSyncPage = () => {
         </div>
 
         {/* How it works banner */}
-        <div className="rounded border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground space-y-1">
+        <div className="rounded border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground space-y-1.5">
           <p className="font-semibold text-foreground text-sm flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-primary" /> How it works
           </p>
           <p>
-            Add <code className="bg-muted px-1 rounded font-mono text-primary">#updateforzlmc</code> in a Z10 comment → AI rewrites it client-friendly → auto-appears here for sync to the linked ZLMC ticket.
+            Add <code className="bg-muted px-1 rounded font-mono text-primary">#update</code> to any comment in a Jira ticket → it auto-appears here for review → on sync, the comment is posted verbatim to the <span className="font-medium text-foreground">clone-linked ticket</span> in the other project.
           </p>
           <p>
-            Add <code className="bg-muted px-1 rounded font-mono text-primary">#updateforz10</code> in a ZLMC comment → AI preserves full detail → auto-appears here for sync to the linked Z10 ticket.
+            The destination is determined by the <span className="font-medium text-foreground">&quot;is cloned by&quot; / &quot;clones&quot;</span> link on the source ticket — not by the project name. Works across any projects you have selected.
           </p>
-          <p className="text-muted-foreground/70">Both boards are scanned automatically every {AUTO_POLL_INTERVAL / 1000}s. You can also scan specific tickets manually below.</p>
+          <p>
+            Synced comments include: original formatting &amp; mentions, inline images, attachments, and a notification to the destination ticket&apos;s reporter and last commenter.
+          </p>
+          <p className="text-muted-foreground/70">Selected projects are scanned automatically every {AUTO_POLL_INTERVAL / 1000}s. You can also scan specific tickets manually below.</p>
         </div>
 
         {/* Stats */}
@@ -326,7 +334,7 @@ const CommentSyncPage = () => {
         {/* Loading state */}
         {isLoading && pendingComments.length === 0 && (
           <div className="rounded bg-card border border-border px-4 py-6 text-center text-xs text-muted-foreground flex items-center justify-center gap-2">
-            <Loader2 className="h-4 w-4 animate-spin" /> Scanning both boards for pending comments…
+            <Loader2 className="h-4 w-4 animate-spin" /> Scanning selected projects for pending comments…
           </div>
         )}
 
@@ -334,8 +342,8 @@ const CommentSyncPage = () => {
         {!isLoading && visibleComments.length === 0 && lastChecked && (
           <div className="rounded bg-card border border-border px-4 py-6 text-center text-xs text-muted-foreground">
             {pendingComments.length > 0 && mentionFilterEnabled
-              ? `✓ No comments mention you (${pendingComments.length} pending for others). `
-              : `✓ No pending comments. Boards are up to date as of ${formatTime(lastChecked)}.`}
+              ? `Showing only @mentions (${pendingComments.length - visibleComments.length} board comments hidden). `
+              : `✓ No pending comments for your boards. Up to date as of ${formatTime(lastChecked!)}.`}
             {pendingComments.length > 0 && mentionFilterEnabled && (
               <button
                 onClick={() => setMentionFilterEnabled(false)}
@@ -358,10 +366,9 @@ const CommentSyncPage = () => {
                   ? "border-primary/40 bg-primary/10 text-primary"
                   : "border-border bg-muted text-muted-foreground"
               }`}
-              title={mentionFilterEnabled ? "Showing only comments mentioning you — click to show all" : "Click to show only comments mentioning you"}
+              title={mentionFilterEnabled ? "Showing only @mentions — click to show all board comments" : "Click to show only comments that tag you"}
             >
-              @{currentUserName.split(" ")[0]} only
-              {mentionFilterEnabled ? " ✓" : ""}
+              {mentionFilterEnabled ? `@mentions only ✓` : "Show @mentions only"}
             </button>
             {mentionFilterEnabled && pendingComments.length > visibleComments.length && (
               <span className="text-xs text-muted-foreground">
@@ -386,7 +393,7 @@ const CommentSyncPage = () => {
                 className="inline-flex items-center gap-1.5 rounded border border-border bg-primary text-primary-foreground px-3 py-1.5 text-xs font-semibold hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSyncingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
-                {isSyncingAll ? "Syncing All…" : `Sync All (${visibleComments.length})`}
+                {isSyncingAll ? "Syncing All…" : `Post All (${authorizedVisible.length})`}
               </button>
             </div>
 
@@ -421,7 +428,11 @@ const CommentSyncPage = () => {
                         key={uid}
                         className="border-b border-border hover:bg-muted/30 transition-colors"
                       >
-                        <td className="py-3 px-4 font-mono font-semibold text-primary">{comment.issueKey}</td>
+                        <td className="py-3 px-4 font-mono font-semibold text-primary">
+                          {ticketUrl(comment.issueKey) ? (
+                            <a href={ticketUrl(comment.issueKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{comment.issueKey}</a>
+                          ) : comment.issueKey}
+                        </td>
                         <td className="py-3 px-4 text-foreground">{comment.author}</td>
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">
                           <span className="flex items-center gap-1">
@@ -430,9 +441,8 @@ const CommentSyncPage = () => {
                           </span>
                         </td>
                         <td className="py-3 px-4">
-                          <span className="inline-flex items-center gap-1 text-muted-foreground">
-                            <ArrowRight className="h-3 w-3" />
-                            {DIRECTION_LABEL[comment.direction]}
+                          <span className="text-muted-foreground">
+                            {DIRECTION_LABEL[comment.direction] || comment.direction}
                           </span>
                         </td>
                         <td className="py-3 px-4">
@@ -446,26 +456,35 @@ const CommentSyncPage = () => {
                             className="flex items-center gap-1 hover:text-foreground text-left"
                             title={isExpanded ? "Collapse" : "Preview comment"}
                           >
-                            <span className="truncate max-w-[180px] flex items-center gap-0.5 flex-wrap">
-                              {renderWithMentions(comment.commentBody.slice(0, 120), comment.mentions)}
+                            <span className="truncate max-w-[180px] text-muted-foreground">
+                              {comment.commentBody.replace(/\n+/g, " ").slice(0, 120)}
                             </span>
                             {isExpanded ? <ChevronUp className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
                           </button>
                         </td>
                         <td className="py-3 px-4 text-center">
-                          <button
-                            onClick={() => handleSync(comment)}
-                            disabled={isSyncingThis || isDone}
-                            className="inline-flex items-center gap-1.5 rounded border border-border bg-card px-3 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {isSyncingThis ? (
-                              <><Loader2 className="h-3 w-3 animate-spin" /> Syncing…</>
-                            ) : isDone ? (
-                              <><Check className="h-3 w-3 text-success" /> Synced</>
-                            ) : (
-                              <><Sparkles className="h-3 w-3 text-primary" /> Sync Now</>
-                            )}
-                          </button>
+                          {comment.authorizedToPost ? (
+                            <button
+                              onClick={() => handleSync(comment)}
+                              disabled={isSyncingThis || isDone}
+                              className="inline-flex items-center gap-1.5 rounded border border-border bg-card px-3 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {isSyncingThis ? (
+                                <><Loader2 className="h-3 w-3 animate-spin" /> Posting…</>
+                              ) : isDone ? (
+                                <><Check className="h-3 w-3 text-success" /> Posted</>
+                              ) : (
+                                <><Sparkles className="h-3 w-3 text-primary" /> Post</>
+                              )}
+                            </button>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded border border-border bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground cursor-not-allowed"
+                              title="You can view this comment but only the author or board admins can post it"
+                            >
+                              ⊙ View only
+                            </span>
+                          )}
                         </td>
                       </tr>
                       {isExpanded && (
@@ -566,14 +585,21 @@ const CommentSyncPage = () => {
                         key={record.id}
                         className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
                       >
-                        <td className="py-3 px-4 font-mono text-primary">{record.sourceKey}</td>
+                        <td className="py-3 px-4 font-mono text-primary">
+                          {ticketUrl(record.sourceKey) ? (
+                            <a href={ticketUrl(record.sourceKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{record.sourceKey}</a>
+                          ) : record.sourceKey}
+                        </td>
                         <td className="py-3 px-4">
-                          <span className="inline-flex items-center gap-1 text-muted-foreground">
-                            <ArrowRight className="h-3 w-3" />
-                            {DIRECTION_LABEL[record.direction]}
+                          <span className="text-muted-foreground">
+                            {DIRECTION_LABEL[record.direction] || record.direction}
                           </span>
                         </td>
-                        <td className="py-3 px-4 font-mono text-primary">{record.targetKey}</td>
+                        <td className="py-3 px-4 font-mono text-primary">
+                          {ticketUrl(record.targetKey) ? (
+                            <a href={ticketUrl(record.targetKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{record.targetKey}</a>
+                          ) : record.targetKey}
+                        </td>
                         <td className="py-3 px-4 text-muted-foreground">{record.author}</td>
                         <td className="py-3 px-4 text-muted-foreground max-w-[280px] truncate">{record.transformedComment}</td>
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">{formatRelative(record.timestamp)}</td>

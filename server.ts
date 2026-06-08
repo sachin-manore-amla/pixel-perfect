@@ -125,6 +125,14 @@ async function makeJiraRequest(
   return fetch(url, options);
 }
 
+/** Make a request to the Jira Agile API (/rest/agile/1.0) */
+async function makeAgileRequest(method: string, endpoint: string): Promise<globalThis.Response> {
+  if (!jiraConfig) throw new Error("Jira configuration not found");
+  const url = `${jiraConfig.instanceUrl}/rest/agile/1.0${endpoint}`;
+  const authHeader = `Basic ${Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString("base64")}`;
+  return fetch(url, { method, headers: { Authorization: authHeader, "Content-Type": "application/json" } });
+}
+
 /**
  * POST /api/jira/config
  * Save Jira configuration
@@ -709,7 +717,7 @@ const SYNC_STATE_FILE = path.join(process.cwd(), ".sync-state.json");
 interface SyncState {
   syncedIds: string[];     // "sourceKey::commentId" — secondary dedup
   history: SyncRecord[];
-  lastSyncedAt: string | null; // ISO — only show comments created AFTER this
+  lastSyncedAt: string | null;
 }
 
 function loadSyncState(): SyncState {
@@ -767,6 +775,7 @@ function isAlreadySynced(sourceKey: string, commentId: string): boolean {
   return syncedCommentIds.has(`${sourceKey}::${commentId}`);
 }
 
+
 /** Extract plain text from Jira ADF (Atlassian Document Format) or plain string */
 function extractADFText(body: unknown): string {
   if (typeof body === "string") return body;
@@ -781,26 +790,26 @@ function extractADFText(body: unknown): string {
     }
     const texts: string[] = [];
     const walk = (nodes: unknown[]) => {
-      for (const node of nodes as Array<{ type?: string; text?: string; content?: unknown[] }>) {
+      for (const node of nodes as Array<{ type?: string; text?: string; attrs?: { text?: string }; content?: unknown[] }>) {
         if (node.type === "text" && node.text) texts.push(node.text);
+        if (node.type === "mention" && node.attrs?.text) texts.push(node.attrs.text);
         if (node.content) walk(node.content);
       }
     };
     walk(adf.content);
-    // Join without separator — preserves hashtags like #updateforz10 that may span zero boundaries
-    return texts.join("");
+    return texts.join("\n");
   }
   return String(body);
 }
 
 /** Extract all @mentioned display names from an ADF comment body */
+/** Extract @mentioned display names from ADF */
 function extractMentions(body: unknown): string[] {
   const mentions: string[] = [];
   if (typeof body !== "object" || body === null) return mentions;
   const walk = (nodes: unknown[]) => {
     for (const node of nodes as Array<{ type?: string; attrs?: { text?: string }; content?: unknown[] }>) {
       if (node.type === "mention" && node.attrs?.text) {
-        // ADF mention text looks like "@Grecy Bais" — strip the leading @
         mentions.push(node.attrs.text.replace(/^@/, "").trim());
       }
       if (node.content) walk(node.content);
@@ -809,6 +818,214 @@ function extractMentions(body: unknown): string[] {
   const adf = body as { content?: unknown[] };
   if (adf.content) walk(adf.content);
   return mentions;
+}
+
+/** Extract accountIds of @mentioned users from ADF */
+function extractMentionAccountIds(body: unknown): string[] {
+  const ids: string[] = [];
+  if (typeof body !== "object" || body === null) return ids;
+  const walk = (nodes: unknown[]) => {
+    for (const node of nodes as Array<{ type?: string; attrs?: { id?: string }; content?: unknown[] }>) {
+      if (node.type === "mention" && node.attrs?.id) ids.push(node.attrs.id);
+      if (node.content) walk(node.content);
+    }
+  };
+  const adf = body as { content?: unknown[] };
+  if (adf.content) walk(adf.content);
+  return ids;
+}
+
+// ─── ADF → HTML renderer ─────────────────────────────────────────────────────
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function renderADFNodes(nodes: unknown[]): string {
+  return (nodes as unknown[]).map((n) => renderADFNode(n as Record<string, unknown>)).join("");
+}
+
+function renderADFNode(n: Record<string, unknown>): string {
+  const type = n.type as string;
+  const content = (n.content as unknown[] | undefined) || [];
+  switch (type) {
+    case "doc": return renderADFNodes(content);
+    case "paragraph": return `<p>${renderADFNodes(content)}</p>`;
+    case "heading": {
+      const level = (n.attrs as Record<string, unknown>)?.level || 2;
+      return `<h${level}>${renderADFNodes(content)}</h${level}>`;
+    }
+    case "bulletList": return `<ul>${renderADFNodes(content)}</ul>`;
+    case "orderedList": return `<ol>${renderADFNodes(content)}</ol>`;
+    case "listItem": return `<li>${renderADFNodes(content)}</li>`;
+    case "blockquote": return `<blockquote>${renderADFNodes(content)}</blockquote>`;
+    case "codeBlock": {
+      const lang = (n.attrs as Record<string, unknown>)?.language || "";
+      return `<pre><code class="language-${escHtml(String(lang))}">${renderADFNodes(content)}</code></pre>`;
+    }
+    case "rule": return `<hr />`;
+    case "hardBreak": return `<br />`;
+    case "text": {
+      const marks = (n.marks as Array<Record<string, unknown>> | undefined) || [];
+      let out = escHtml((n.text as string) || "");
+      for (const mark of marks) {
+        switch (mark.type) {
+          case "strong": out = `<strong>${out}</strong>`; break;
+          case "em": out = `<em>${out}</em>`; break;
+          case "code": out = `<code>${out}</code>`; break;
+          case "strike": out = `<s>${out}</s>`; break;
+          case "underline": out = `<u>${out}</u>`; break;
+          case "link": {
+            const href = escHtml(String((mark.attrs as Record<string, unknown>)?.href || ""));
+            out = `<a href="${href}" class="adf-link" target="_blank" rel="noopener noreferrer">${out}</a>`;
+            break;
+          }
+        }
+      }
+      return out;
+    }
+    case "mention": {
+      const text = escHtml(String((n.attrs as Record<string, unknown>)?.text || ""));
+      return `<span class="adf-mention">${text}</span>`;
+    }
+    case "inlineCard": return ""; // suppress
+    case "mediaSingle": return ""; // suppress images
+    case "media": return "";
+    default: return renderADFNodes(content);
+  }
+}
+
+function extractADFHtml(body: unknown): string {
+  if (typeof body === "string") return `<p>${escHtml(body)}</p>`;
+  if (typeof body !== "object" || body === null) return "";
+  return renderADFNode(body as Record<string, unknown>);
+}
+
+// ─── Board admin cache (15-min TTL) ─────────────────────────────────────────
+let boardAdminMap = new Map<number, Set<string>>();
+let boardNameMap = new Map<number, string>();
+let boardCacheBuiltAt: number | null = null;
+const BOARD_CACHE_TTL_MS = 15 * 60 * 1000;
+
+function clearBoardAdminCache() {
+  boardAdminMap = new Map();
+  boardNameMap = new Map();
+  boardCacheBuiltAt = null;
+}
+
+async function buildBoardAdminCache(projects: string[]): Promise<void> {
+  if (boardCacheBuiltAt && Date.now() - boardCacheBuiltAt < BOARD_CACHE_TTL_MS) return;
+  const newAdminMap = new Map<number, Set<string>>();
+  const newNameMap = new Map<number, string>();
+  await Promise.allSettled(
+    projects.map(async (key) => {
+      try {
+        const res = await makeAgileRequest("GET", `/board?projectKeyOrId=${key}`);
+        if (!res.ok) return;
+        const data = await res.json() as { values?: Array<{ id: number; name: string }> };
+        for (const board of data.values || []) {
+          newNameMap.set(board.id, board.name);
+          const detailRes = await makeAgileRequest("GET", `/board/${board.id}`);
+          if (!detailRes.ok) continue;
+          const detail = await detailRes.json() as { admins?: { users?: Array<{ accountId: string }> } };
+          const adminIds = new Set((detail.admins?.users || []).map((u) => u.accountId));
+          newAdminMap.set(board.id, adminIds);
+        }
+      } catch {}
+    })
+  );
+  boardAdminMap = newAdminMap;
+  boardNameMap = newNameMap;
+  boardCacheBuiltAt = Date.now();
+}
+
+/** Extract media node count + external links from ADF body */
+function extractCommentMediaInfo(body: unknown): { mediaCount: number; links: string[] } {
+  let mediaCount = 0;
+  const links: string[] = [];
+  if (typeof body !== "object" || body === null) return { mediaCount, links };
+  const walk = (nodes: unknown[]) => {
+    for (const node of nodes as Array<Record<string, unknown>>) {
+      if (node.type === "media") mediaCount++;
+      if (node.type === "inlineCard") {
+        const url = (node.attrs as Record<string, unknown>)?.url;
+        if (typeof url === "string") links.push(url);
+      }
+      if (node.type === "text") {
+        const marks = (node.marks as Array<Record<string, unknown>> | undefined) || [];
+        for (const m of marks) {
+          if (m.type === "link") {
+            const href = (m.attrs as Record<string, unknown>)?.href;
+            if (typeof href === "string" && href.startsWith("http")) links.push(href);
+          }
+        }
+      }
+      if (node.content) walk(node.content as unknown[]);
+    }
+  };
+  const adfBody = body as { content?: unknown[] };
+  if (adfBody.content) walk(adfBody.content);
+  return { mediaCount, links };
+}
+
+/** Fix media collection IDs so inline images render on the destination ticket */
+function remapMediaCollections(node: unknown, destIssueId: string): unknown {
+  if (typeof node !== "object" || node === null) return node;
+  if (Array.isArray(node)) return (node as unknown[]).map((n) => remapMediaCollections(n, destIssueId));
+  const n = node as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(n)) {
+    if (k === "attrs" && typeof v === "object" && v !== null) {
+      const attrs = v as Record<string, unknown>;
+      result[k] = { ...attrs, ...(attrs.collection ? { collection: `MediaServicesSample__${destIssueId}` } : {}) };
+    } else if (k === "content" && Array.isArray(v)) {
+      result[k] = (v as unknown[]).map((child) => remapMediaCollections(child, destIssueId));
+    } else {
+      result[k] = v;
+    }
+  }
+  return result;
+}
+
+/** Fire-and-forget: copy source attachments to destination ticket */
+async function copyAttachmentsToDestination(
+  _sourceKey: string,
+  destKey: string,
+  attachments: Array<{ id: string; filename: string; mimeType: string }>
+): Promise<void> {
+  if (!jiraConfig || attachments.length === 0) return;
+  const authHeader = `Basic ${Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString("base64")}`;
+  for (const att of attachments) {
+    try {
+      const downloadRes = await fetch(`${jiraConfig.instanceUrl}/rest/api/3/attachment/content/${att.id}`, {
+        headers: { Authorization: authHeader },
+      });
+      if (!downloadRes.ok) continue;
+      const buffer = await downloadRes.arrayBuffer();
+      const formData = new FormData();
+      formData.append("file", new Blob([buffer], { type: att.mimeType }), att.filename);
+      await fetch(`${jiraConfig.instanceUrl}/rest/api/3/issue/${destKey}/attachments`, {
+        method: "POST",
+        headers: { Authorization: authHeader, "X-Atlassian-Token": "no-check" },
+        body: formData,
+      });
+    } catch {}
+  }
+}
+
+/** Strip #update hashtag text nodes from ADF before posting to destination */
+function removeHashtagFromADF(node: unknown): unknown {
+  if (typeof node !== "object" || node === null) return node;
+  if (Array.isArray(node)) return (node as unknown[]).map((n) => removeHashtagFromADF(n)).filter(Boolean);
+  const n = node as Record<string, unknown>;
+  if (n.type === "text" && typeof n.text === "string") {
+    const cleaned = (n.text as string).replace(/#update\b/gi, "").replace(/\s{2,}/g, " ").trim();
+    if (!cleaned) return null;
+    return { ...n, text: cleaned };
+  }
+  if (n.content && Array.isArray(n.content)) {
+    return { ...n, content: (n.content as unknown[]).map((c) => removeHashtagFromADF(c)).filter(Boolean) };
+  }
+  return n;
 }
 
 /** Use OpenAI to rewrite a comment for the target audience */
@@ -893,58 +1110,99 @@ async function internalSyncComment(
   commentId: string,
   author: string
 ): Promise<SyncRecord> {
-  const isToZLMC = /#updateforzlmc/i.test(commentBody);
-  const direction: "to-zlmc" | "to-z10" = isToZLMC ? "to-zlmc" : "to-z10";
+  // Direction is determined by source project — no hashtag ambiguity
+  const isFromZLMC = /^Z10LMC-/i.test(issueKey);
+  const direction = isFromZLMC ? "to-z10" : "to-zlmc";
 
-  console.log(`[SYNC] Fetching issue ${issueKey} for linked tickets`);
-  const issueRes = await makeJiraRequest("GET", `/issue/${issueKey}?fields=summary,issuelinks`);
-  if (!issueRes.ok) throw new Error(`Failed to fetch issue ${issueKey} from Jira (${issueRes.status})`);
+  console.log(`[SYNC] Fetching issue ${issueKey} + raw comment body`);
+  const [issueRes, commentRes] = await Promise.all([
+    makeJiraRequest("GET", `/issue/${issueKey}?fields=summary,issuelinks,attachment`),
+    commentId ? makeJiraRequest("GET", `/issue/${issueKey}/comment/${commentId}`) : Promise.resolve(null),
+  ]);
+  if (!issueRes.ok) throw new Error(`Failed to fetch issue ${issueKey} (${issueRes.status})`);
   const issueData = await issueRes.json();
-  const ticketSummary: string = issueData.fields?.summary || "";
+  const issueAttachments: Array<{ id: string; filename: string; mimeType: string }> = issueData.fields?.attachment || [];
 
+  // Get raw ADF body
+  let rawADFBody: unknown = null;
+  if (commentRes && commentRes.ok) {
+    const cd = await commentRes.json();
+    rawADFBody = cd.body || null;
+  }
+
+  // Find the clone-linked ticket — any project, just must be a "clones"/"is cloned by" link
   const links: Array<{
+    type?: { name?: string; inward?: string; outward?: string };
     outwardIssue?: { key: string };
     inwardIssue?: { key: string };
   }> = issueData.fields?.issuelinks || [];
-
   let linkedKey: string | null = null;
   for (const link of links) {
+    const typeName = (link.type?.name || "").toLowerCase();
+    const inward = (link.type?.inward || "").toLowerCase();
+    const outward = (link.type?.outward || "").toLowerCase();
+    const isCloneLink =
+      typeName.includes("clone") ||
+      inward.includes("clone") ||
+      outward.includes("clone");
+    if (!isCloneLink) continue;
     const candidate = link.outwardIssue?.key || link.inwardIssue?.key;
-    if (!candidate) continue;
-    if (direction === "to-zlmc" && /^Z10LMC-/i.test(candidate)) { linkedKey = candidate; break; }
-    if (direction === "to-z10" && /^Z10-\d/i.test(candidate)) { linkedKey = candidate; break; }
+    if (candidate) { linkedKey = candidate; break; }
   }
-
   if (!linkedKey) {
-    const target = direction === "to-zlmc" ? "ZLMC (Z10LMC-*)" : "Z10 (Z10-*)";
-    throw new Error(`No linked ${target} ticket found on ${issueKey}. Ensure tickets are linked in Jira.`);
+    throw new Error(`No "clones"/"is cloned by" link found on ${issueKey}. Ensure a clone link exists in Jira.`);
   }
 
-  console.log(`[SYNC] Transforming comment (${direction}) for linked ticket ${linkedKey}`);
-  const transformedComment = await transformCommentWithAI(commentBody, direction, ticketSummary);
+  // Fetch destination issue to get reporter + last commenter for @mention notification
+  const destRes = await makeJiraRequest("GET", `/issue/${linkedKey}?fields=reporter,comment`);
+  const destData = destRes.ok ? await destRes.json() : null;
+  const destReporter = destData?.fields?.reporter as { accountId?: string; displayName?: string } | null;
+  const destComments: unknown[] = destData?.fields?.comment?.comments || [];
+  const lastCommenter = destComments.length > 0
+    ? (destComments[destComments.length - 1] as { author?: { accountId?: string; displayName?: string } }).author
+    : null;
 
-  const attribution = `Synced by JiraTriage · ${issueKey}`;
+  // Build notification paragraph with @mentions
+  const mentionNodes: unknown[] = [];
+  const seen = new Set<string>();
+  const addMention = (accountId?: string, displayName?: string) => {
+    if (!accountId || seen.has(accountId)) return;
+    seen.add(accountId);
+    if (mentionNodes.length > 0) mentionNodes.push({ type: "text", text: " " });
+    mentionNodes.push({ type: "mention", attrs: { id: accountId, text: `@${displayName || accountId}` } });
+  };
+  addMention(destReporter?.accountId, destReporter?.displayName);
+  addMention(lastCommenter?.accountId, lastCommenter?.displayName);
+
+  const notifParagraph = mentionNodes.length > 0
+    ? [{ type: "paragraph", content: [{ type: "text", text: "FYI: " }, ...mentionNodes, { type: "text", text: ` — update from ${issueKey}:` }] }]
+    : [];
+
+  // Build body content: strip #update from original ADF, remap media collections
+  let bodyContent: unknown[];
+  if (rawADFBody && typeof rawADFBody === "object" && (rawADFBody as Record<string, unknown>).type === "doc") {
+    const cleaned = removeHashtagFromADF(rawADFBody) as Record<string, unknown>;
+    const remapped = remapMediaCollections(cleaned, linkedKey) as Record<string, unknown>;
+    bodyContent = (remapped.content as unknown[]) || [];
+  } else {
+    const cleaned = commentBody.replace(/#update\b/gi, "").trim();
+    bodyContent = [{ type: "paragraph", content: [{ type: "text", text: cleaned }] }];
+  }
+
+  const attributionParagraph = {
+    type: "paragraph",
+    content: [{ type: "text", text: `Posted by JiraTriage · ${issueKey}`, marks: [{ type: "em" }] }],
+  };
 
   const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, {
-    body: {
-      type: "doc",
-      version: 1,
-      content: [
-        { type: "paragraph", content: [{ type: "text", text: transformedComment }] },
-        {
-          type: "paragraph",
-          content: [
-            {
-              type: "text",
-              text: attribution.trim(),
-              marks: [{ type: "em" }],
-            },
-          ],
-        },
-      ],
-    },
+    body: { type: "doc", version: 1, content: [...notifParagraph, ...bodyContent, attributionParagraph] },
   });
   const postData = await postRes.json();
+
+  // Fire-and-forget attachment copy
+  if (postRes.ok && issueAttachments.length > 0) {
+    copyAttachmentsToDestination(issueKey, linkedKey, issueAttachments).catch(() => {});
+  }
 
   const record: SyncRecord = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -953,7 +1211,7 @@ async function internalSyncComment(
     direction,
     commentId,
     originalComment: commentBody,
-    transformedComment,
+    transformedComment: commentBody,
     author,
     timestamp: new Date().toISOString(),
     status: postRes.ok ? "success" : "failed",
@@ -980,10 +1238,8 @@ app.post(
         return res.status(400).json({ error: "issueKey and commentBody are required" });
       }
 
-      const isToZLMC = /#updateforzlmc/i.test(commentBody);
-      const isToZ10 = /#updateforz10/i.test(commentBody);
-      if (!isToZLMC && !isToZ10) {
-        return res.status(400).json({ error: "No sync hashtag (#updateforzlmc or #updateforz10) found in comment" });
+      if (!/#update\b/i.test(commentBody)) {
+        return res.status(400).json({ error: "No #update hashtag found in comment" });
       }
 
       // Dedup by commentId
@@ -1086,7 +1342,10 @@ app.post(
   requireJiraConfig,
   async (req: Request, res: Response) => {
     try {
-      const { days = 1, maxIssues = 200 } = req.body || {};
+      const { days = 1, maxIssues = 200, projectKeys = [] } = req.body || {};
+      const projects: string[] = Array.isArray(projectKeys) && projectKeys.length > 0
+        ? projectKeys
+        : ["Z10", "Z10LMC"]; // fallback if none provided
 
       if (!jiraConfig) return res.status(400).json({ error: "Jira not configured" });
 
@@ -1105,10 +1364,10 @@ app.post(
         updatedFilter = `-${days}d`;
       }
 
-      const jqlQueries = [
-        `project = Z10 AND updated >= "${updatedFilter}" ORDER BY updated DESC`,
-        `project = Z10LMC AND updated >= "${updatedFilter}" ORDER BY updated DESC`,
-      ];
+      // One JQL query per selected project
+      const jqlQueries = projects.map(
+        (p: string) => `project = ${p} AND updated >= "${updatedFilter}" ORDER BY updated DESC`
+      );
 
       // Fetch both project ticket lists in parallel
       const allIssueKeys: string[] = [];
@@ -1141,47 +1400,111 @@ app.post(
       const uniqueKeys = [...new Set(allIssueKeys)];
       console.log(`[AUTO-DISCOVER] Scanning ${uniqueKeys.length} tickets (window: ${updatedFilter})`);
 
+      // Get current user + board admin cache in parallel
+      let currentUserAccountId = "";
+      await Promise.allSettled([
+        makeJiraRequest("GET", "/myself").then(async (r) => {
+          if (r.ok) { const d = await r.json(); currentUserAccountId = d.accountId || ""; }
+        }),
+        buildBoardAdminCache(projects),
+      ]);
+
       const results: Array<{
         issueKey: string;
         commentId: string;
         commentBody: string;
+        commentBodyHtml: string;
         author: string;
+        authorAccountId: string;
         created: string;
-        direction: "to-zlmc" | "to-z10";
+        direction: string;
         mentions: string[];
+        authorizedToPost: boolean;
+        boardId: number | null;
+        boardName: string;
+        attachmentCount: number;
+        attachments: Array<{ name: string; url: string | null }>;
+        externalLinkCount: number;
+        externalLinks: string[];
       }> = [];
 
       // Fetch comments for all tickets in parallel (10 at a time)
       await runConcurrent(
         uniqueKeys,
         async (key) => {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment`);
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment`);
           if (!commentsRes.ok) return;
           const data = await commentsRes.json();
+
+          // Determine board for this issue via sprint field
+          const sprintFieldKey = Object.keys(data.fields || {}).find((k) =>
+            Array.isArray(data.fields[k]) && data.fields[k][0]?.boardId
+          );
+          const issueBoardId: number | null = sprintFieldKey
+            ? (data.fields[sprintFieldKey][0]?.boardId ?? null)
+            : null;
+          const issueBoardName: string = issueBoardId ? (boardNameMap.get(issueBoardId) || "") : "";
+          const issueAttachments: Array<{ id: string; filename: string; mimeType: string; created: string }> =
+            data.fields?.attachment || [];
+          const filenameToAtt = new Map(issueAttachments.map((a) => [a.filename.toLowerCase(), a]));
+          const boardAdmins = issueBoardId ? boardAdminMap.get(issueBoardId) : undefined;
+
           const comments: Array<{
             id: string;
             body: unknown;
-            author?: { displayName?: string };
+            author?: { displayName?: string; accountId?: string };
             created: string;
           }> = data.fields?.comment?.comments || [];
 
           for (const c of comments) {
             const text = extractADFText(c.body);
-            const isToZLMC = /#updateforzlmc/i.test(text);
-            const isToZ10 = /#updateforz10/i.test(text);
-            if (!isToZLMC && !isToZ10) continue;
-
-            // Skip only comments that have already been synced
+            const isUpdate = /#update\b/i.test(text);
+            if (!isUpdate) continue;
             if (isAlreadySynced(key, c.id)) continue;
+
+            const isAuthor = c.author?.accountId === currentUserAccountId;
+            const isMentioned = extractMentionAccountIds(c.body).includes(currentUserAccountId);
+            let authorizedToPost: boolean;
+            if (isAuthor) authorizedToPost = true;
+            else if (isMentioned) authorizedToPost = true;
+            else if (boardAdminMap.size === 0) authorizedToPost = true;
+            else if (issueBoardId !== null) authorizedToPost = boardAdmins?.has(currentUserAccountId) ?? false;
+            else authorizedToPost = false;
+
+            const { mediaCount, links } = extractCommentMediaInfo(c.body);
+            const commentAttachments: Array<{ name: string; url: string | null }> = [];
+            const commentTime = new Date(c.created).getTime();
+            let mediaIdx = 0;
+            for (const att of issueAttachments) {
+              if (mediaIdx >= mediaCount) break;
+              const byName = filenameToAtt.has(att.filename.toLowerCase());
+              const byTime = Math.abs(new Date(att.created).getTime() - commentTime) < 60_000;
+              if (byName || byTime) {
+                commentAttachments.push({
+                  name: att.filename,
+                  url: `${jiraConfig!.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
+                });
+                mediaIdx++;
+              }
+            }
 
             results.push({
               issueKey: key,
               commentId: c.id,
               commentBody: text,
+              commentBodyHtml: extractADFHtml(c.body),
               author: c.author?.displayName || "Unknown",
+              authorAccountId: c.author?.accountId || "",
               created: c.created,
-              direction: isToZLMC ? "to-zlmc" : "to-z10",
+              direction: /^Z10LMC-/i.test(key) ? "to-z10" : "to-zlmc",
               mentions: extractMentions(c.body),
+              authorizedToPost,
+              boardId: issueBoardId,
+              boardName: issueBoardName,
+              attachmentCount: commentAttachments.length,
+              attachments: commentAttachments,
+              externalLinkCount: links.length,
+              externalLinks: links,
             });
           }
         },
@@ -1213,49 +1536,113 @@ app.post(
         return res.status(400).json({ error: "issueKeys array is required" });
       }
 
+      // Get current user + board admin cache in parallel
+      let pollCurrentUserAccountId = "";
+      const pollProjects = [...new Set(issueKeys.map((k: string) => k.replace(/-\d+$/, "")))]; 
+      await Promise.allSettled([
+        makeJiraRequest("GET", "/myself").then(async (r) => {
+          if (r.ok) { const d = await r.json(); pollCurrentUserAccountId = d.accountId || ""; }
+        }),
+        buildBoardAdminCache(pollProjects),
+      ]);
+
       const results: Array<{
         issueKey: string;
         commentId: string;
         commentBody: string;
+        commentBodyHtml: string;
         author: string;
+        authorAccountId: string;
         created: string;
-        direction: "to-zlmc" | "to-z10";
+        direction: string;
         mentions: string[];
+        authorizedToPost: boolean;
+        boardId: number | null;
+        boardName: string;
+        attachmentCount: number;
+        attachments: Array<{ name: string; url: string | null }>;
+        externalLinkCount: number;
+        externalLinks: string[];
       }> = [];
 
       for (const key of issueKeys) {
         try {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment`);
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment`);
           if (!commentsRes.ok) continue;
           const data = await commentsRes.json();
+
+          const sprintFieldKey = Object.keys(data.fields || {}).find((k) =>
+            Array.isArray(data.fields[k]) && data.fields[k][0]?.boardId
+          );
+          const issueBoardId: number | null = sprintFieldKey
+            ? (data.fields[sprintFieldKey][0]?.boardId ?? null)
+            : null;
+          const issueBoardName: string = issueBoardId ? (boardNameMap.get(issueBoardId) || "") : "";
+          const issueAttachments: Array<{ id: string; filename: string; mimeType: string; created: string }> =
+            data.fields?.attachment || [];
+          const filenameToAtt = new Map(issueAttachments.map((a) => [a.filename.toLowerCase(), a]));
+          const boardAdmins = issueBoardId ? boardAdminMap.get(issueBoardId) : undefined;
+
           const comments: Array<{
             id: string;
             body: unknown;
-            author?: { displayName?: string };
+            author?: { displayName?: string; accountId?: string };
             created: string;
           }> = data.fields?.comment?.comments || [];
 
           for (const c of comments) {
             const text = extractADFText(c.body);
-            const isToZLMC = /#updateforzlmc/i.test(text);
-            const isToZ10 = /#updateforz10/i.test(text);
-            console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | toZLMC=${isToZLMC} toZ10=${isToZ10}`);
-            if (!isToZLMC && !isToZ10) continue;
-
-            // Skip only comments that have already been synced
+            const isUpdate = /#update\b/i.test(text);
+            console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | isUpdate=${isUpdate}`);
+            if (!isUpdate) continue;
             if (isAlreadySynced(key, c.id)) {
               console.log(`[POLL] Skipping ${key}::${c.id} — already synced`);
               continue;
+            }
+
+            const isAuthor = c.author?.accountId === pollCurrentUserAccountId;
+            const isMentioned = extractMentionAccountIds(c.body).includes(pollCurrentUserAccountId);
+            let authorizedToPost: boolean;
+            if (isAuthor) authorizedToPost = true;
+            else if (isMentioned) authorizedToPost = true;
+            else if (boardAdminMap.size === 0) authorizedToPost = true;
+            else if (issueBoardId !== null) authorizedToPost = boardAdmins?.has(pollCurrentUserAccountId) ?? false;
+            else authorizedToPost = false;
+
+            const { mediaCount, links } = extractCommentMediaInfo(c.body);
+            const commentAttachments: Array<{ name: string; url: string | null }> = [];
+            const commentTime = new Date(c.created).getTime();
+            let mediaIdx = 0;
+            for (const att of issueAttachments) {
+              if (mediaIdx >= mediaCount) break;
+              const byName = filenameToAtt.has(att.filename.toLowerCase());
+              const byTime = Math.abs(new Date(att.created).getTime() - commentTime) < 60_000;
+              if (byName || byTime) {
+                commentAttachments.push({
+                  name: att.filename,
+                  url: `${jiraConfig!.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
+                });
+                mediaIdx++;
+              }
             }
 
             results.push({
               issueKey: key,
               commentId: c.id,
               commentBody: text,
+              commentBodyHtml: extractADFHtml(c.body),
               author: c.author?.displayName || "Unknown",
+              authorAccountId: c.author?.accountId || "",
               created: c.created,
-              direction: isToZLMC ? "to-zlmc" : "to-z10",
+              direction: /^Z10LMC-/i.test(key) ? "to-z10" : "to-zlmc",
               mentions: extractMentions(c.body),
+              authorizedToPost,
+              boardId: issueBoardId,
+              boardName: issueBoardName,
+              attachmentCount: commentAttachments.length,
+              attachments: commentAttachments,
+              externalLinkCount: links.length,
+              externalLinks: links,
             });
           }
         } catch (e) {
