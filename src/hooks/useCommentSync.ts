@@ -2,11 +2,23 @@ import { useState, useCallback } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
+/** Safe JSON parser — returns {} instead of throwing on empty/invalid body */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function safeJson(res: Response): Promise<any> {
+  try {
+    const text = await res.text();
+    if (!text || !text.trim()) return {};
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
 export interface SyncRecord {
   id: string;
   sourceKey: string;
   targetKey: string;
-  direction: "to-zlmc" | "to-z10";
+  direction: string;
   commentId: string;
   originalComment: string;
   transformedComment: string;
@@ -20,10 +32,19 @@ export interface PendingComment {
   issueKey: string;
   commentId: string;
   commentBody: string;
+  commentBodyHtml: string;
   author: string;
+  authorAccountId: string;
   created: string;
-  direction: "to-zlmc" | "to-z10";
+  direction: string;
   mentions: string[];
+  authorizedToPost: boolean;
+  boardId: number | null;
+  boardName: string;
+  attachmentCount: number;
+  attachments: Array<{ name: string; url: string | null }>;
+  externalLinkCount: number;
+  externalLinks: string[];
 }
 
 export interface SyncAllSummary {
@@ -200,7 +221,7 @@ export function useCommentSync() {
   const fetchSyncHistory = useCallback(async (): Promise<SyncRecord[]> => {
     try {
       const res = await fetch(`${API_BASE}/api/jira/sync-history`);
-      const data = await res.json();
+      const data = await safeJson(res);
       const history: SyncRecord[] = data.history || [];
       setSyncHistory(history);
       return history;
@@ -215,7 +236,9 @@ export function useCommentSync() {
     try {
       const res = await fetch(`${API_BASE}/api/jira/current-user`);
       if (!res.ok) return null;
-      return await res.json();
+      const data = await safeJson(res);
+      if (!data.displayName) return null;
+      return data as { displayName: string; email: string };
     } catch {
       return null;
     }
@@ -237,17 +260,4 @@ export function useCommentSync() {
     fetchSyncHistory,
     fetchCurrentUser,
   };
-}
-
-export interface SyncRecord {
-  id: string;
-  sourceKey: string;
-  targetKey: string;
-  direction: "to-zlmc" | "to-z10";
-  originalComment: string;
-  transformedComment: string;
-  author: string;
-  timestamp: string;
-  status: "success" | "failed";
-  error?: string;
 }

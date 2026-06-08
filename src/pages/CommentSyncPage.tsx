@@ -15,8 +15,12 @@ import {
   AlertCircle,
   Radio,
   ChevronRight,
+  Paperclip,
+  Link,
 } from "lucide-react";
 import { useCommentSync, type PendingComment, type SyncRecord } from "@/hooks/useCommentSync";
+import { useSelectedProjects } from "@/hooks/useSelectedProjects";
+import { useJiraConfig } from "@/hooks/use-jira-config";
 
 const DIRECTION_LABEL: Record<string, string> = {
   "to-zlmc": "Z10 → ZLMC",
@@ -466,15 +470,39 @@ const CommentSyncPage = () => {
                       </tr>
                       {isExpanded && (
                         <tr key={`${uid}-expanded`} className="border-b border-border bg-muted/20">
-                          <td colSpan={7} className="px-4 py-3">
-                            <div className="rounded border border-border bg-muted/40 px-3 py-2 text-xs text-foreground whitespace-pre-wrap font-mono leading-relaxed">
-                              {renderWithMentions(comment.commentBody, comment.mentions)}
-                            </div>
-                            {comment.mentions.length > 0 && (
-                              <div className="mt-1.5 flex items-center gap-1 flex-wrap">
-                                <span className="text-[10px] text-muted-foreground">Tagged:</span>
-                                {comment.mentions.map((m) => (
-                                  <span key={m} className="inline-flex items-center rounded-full bg-primary/15 text-primary px-1.5 py-0 text-[10px] font-semibold">@{m}</span>
+                          <td colSpan={7} className="px-4 py-3 space-y-2">
+                            {/* Comment body — full ADF formatting preserved */}
+                            <div
+                              className="adf-body rounded border border-border bg-muted/40 px-3 py-2 text-xs text-foreground leading-relaxed"
+                              dangerouslySetInnerHTML={{ __html: comment.commentBodyHtml || comment.commentBody }}
+                            />
+
+                            {/* Attachments */}
+                            {comment.attachmentCount > 0 && (
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <Paperclip className="h-3 w-3 text-muted-foreground/70 shrink-0" />
+                                {comment.attachments.map(({ name, url }, i) =>
+                                  url ? (
+                                    <a key={i} href={url} target="_blank" rel="noopener noreferrer"
+                                      className="inline-flex items-center rounded bg-muted px-1.5 py-0 text-[10px] text-primary font-mono hover:underline">
+                                      {name}
+                                    </a>
+                                  ) : (
+                                    <span key={i} className="inline-flex items-center rounded bg-muted px-1.5 py-0 text-[10px] text-muted-foreground font-mono">{name}</span>
+                                  )
+                                )}
+                              </div>
+                            )}
+
+                            {/* External links */}
+                            {comment.externalLinkCount > 0 && (
+                              <div className="flex items-start gap-1 flex-wrap">
+                                <Link className="h-3 w-3 text-muted-foreground/70 shrink-0 mt-0.5" />
+                                {comment.externalLinks.map((url) => (
+                                  <a key={url} href={url} target="_blank" rel="noopener noreferrer"
+                                    className="inline-flex items-center rounded bg-muted px-1.5 py-0 text-[10px] text-primary font-mono hover:underline max-w-[280px] truncate">
+                                    {url}
+                                  </a>
                                 ))}
                               </div>
                             )}
