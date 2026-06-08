@@ -44,7 +44,6 @@ const AttentionPage = () => {
 
   useEffect(() => {
     setP1Dismissed(getDismissed(P1_DISMISSED_KEY));
-    setUnattendedDismissed(getDismissed(UNATTENDED_DISMISSED_KEY));
   }, []);
   const { config: jiraConfig } = useJiraConfig();
   const { data: currentJiraUser } = useCurrentJiraUser();
@@ -58,7 +57,7 @@ const AttentionPage = () => {
   const p1TotalPages = Math.ceil(attentionRequired.length / P1_PAGE_SIZE);
   const p1PagedTickets = attentionRequired.slice((p1Page - 1) * P1_PAGE_SIZE, p1Page * P1_PAGE_SIZE);
   const recentActivity = recentActivityData || [];
-  const unattendedTickets = (unattendedData || []).filter(t => !unattendedDismissed[t.ticketKey]);
+  const unattendedTickets = unattendedData || [];
   const unattendedTotalPages = Math.ceil(unattendedTickets.length / UNATTENDED_PAGE_SIZE);
   const unattendedPagedTickets = unattendedTickets.slice((unattendedPage - 1) * UNATTENDED_PAGE_SIZE, unattendedPage * UNATTENDED_PAGE_SIZE);
  
@@ -374,17 +373,9 @@ const AttentionPage = () => {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <h2 className="text-lg font-semibold text-foreground uppercase tracking-wide">P1 Unattended Tickets</h2>
-              <p className="text-sm text-muted-foreground mt-1">Active P1 tickets with no response in {getWindowLabel().toLowerCase()} • Click ticket key to open &amp; dismiss</p>
+              <p className="text-sm text-muted-foreground mt-1">Active P1 tickets with no response in {getWindowLabel().toLowerCase()}</p>
             </div>
             <div className="flex items-center gap-2">
-              {Object.keys(unattendedDismissed).length > 0 && (
-                <button
-                  onClick={() => { clearDismissed(UNATTENDED_DISMISSED_KEY); setUnattendedDismissed({}); setUnattendedPage(1); }}
-                  className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded px-2 py-1"
-                >
-                  <RotateCcw className="h-3 w-3" /> Reset ({Object.keys(unattendedDismissed).length} hidden)
-                </button>
-              )}
               {unattendedLoading && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
             </div>
           </div>
@@ -422,10 +413,6 @@ const AttentionPage = () => {
                           target="_blank"
                           rel="noopener noreferrer"
                           className="font-mono text-primary font-semibold hover:underline"
-                          onClick={() => {
-                            markDismissed(UNATTENDED_DISMISSED_KEY, t.ticketKey);
-                            setUnattendedDismissed(prev => ({ ...prev, [t.ticketKey]: Date.now() }));
-                          }}
                         >
                           {t.ticketKey}
                         </a>

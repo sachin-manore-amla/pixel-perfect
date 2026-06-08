@@ -177,7 +177,22 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
       let isMentionedRecently = false;
       if (currentUser) {
         const lastFewComments = comments.slice(-3);
-        isMentionedRecently = lastFewComments.some((c) => {
+
+        // If the LATEST comment was written BY the current user → they already replied, skip
+        const lastComment = lastFewComments[lastFewComments.length - 1];
+        const lastAuthorName = lastComment?.author?.displayName?.toLowerCase();
+        if (lastAuthorName === currentUser.displayName.toLowerCase()) {
+          console.log(`[Tickets Service] ${ticket.key}: currentUser is the last commenter — they already replied, skipping`);
+          continue;
+        }
+
+        // Only check comments NOT written by the current user for mention detection
+        // Prevents: "I tagged @SomeoneElse in my own comment" from being treated as self-mention
+        const commentsNotByUser = lastFewComments.filter((c) =>
+          c.author?.displayName?.toLowerCase() !== currentUser.displayName.toLowerCase()
+        );
+
+        isMentionedRecently = commentsNotByUser.some((c) => {
           // ADF accountId check — check both "id" and "accountId" keys
           if (typeof c.body === "object" && c.body !== null) {
             const bodyStr = JSON.stringify(c.body);
@@ -195,10 +210,10 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
           return false;
         });
         if (!isMentionedRecently) {
-          console.log(`[Tickets Service] ${ticket.key}: currentUser not mentioned in last 3 comments — skipping`);
+          console.log(`[Tickets Service] ${ticket.key}: currentUser not mentioned in last 3 comments by others — skipping`);
           continue; // Must be mentioned — short-circuit
         }
-        console.log(`[Tickets Service] ${ticket.key}: ✅ @${currentUser.displayName} mentioned in last 3 comments`);
+        console.log(`[Tickets Service] ${ticket.key}: ✅ @${currentUser.displayName} mentioned in last 3 comments by someone else`);
       }
 
       // --- STEP B: AI / keyword analysis — question or blocker must also be present ---
