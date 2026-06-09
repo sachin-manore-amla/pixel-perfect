@@ -70,7 +70,8 @@ export function useCommentSync() {
       issueKey: string,
       commentBody: string,
       commentId: string,
-      author = "Unknown"
+      author = "Unknown",
+      authorizedToPost = true
     ): Promise<SyncRecord> => {
       setIsSyncing(true);
       setError(null);
@@ -78,7 +79,7 @@ export function useCommentSync() {
         const res = await fetch(`${API_BASE}/api/jira/sync-comment`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ issueKey, commentBody, commentId, author }),
+          body: JSON.stringify({ issueKey, commentBody, commentId, author, authorizedToPost }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Sync failed");

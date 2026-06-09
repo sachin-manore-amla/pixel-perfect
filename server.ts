@@ -27,6 +27,17 @@ let jiraConfig: JiraConfig | null = null;
 
 // Path to persist config across server restarts
 const CONFIG_FILE = path.join(process.cwd(), ".jira-config.json");
+const SYNC_LOG_FILE = path.join(process.cwd(), "sync-debug.log");
+
+function writeSyncLog(message: string) {
+  const line = `[${new Date().toISOString()}] ${message}`;
+  console.log(line);
+  try {
+    fs.appendFileSync(SYNC_LOG_FILE, `${line}\n`, "utf-8");
+  } catch {
+    // do not fail request if logging fails
+  }
+}
 
 function loadPersistedConfig(): JiraConfig | null {
   try {
@@ -105,10 +116,17 @@ async function makeJiraRequest(
     throw new Error("Jira configuration not found");
   }
 
-  const url = `${jiraConfig.instanceUrl}/rest/api/3${endpoint}`;
-  const authHeader = `Basic ${Buffer.from(
-    `${jiraConfig.email}:${jiraConfig.apiToken}`
-  ).toString("base64")}`;
+  return makeJiraRequestWithConfig(jiraConfig, method, endpoint, body);
+}
+
+function makeJiraRequestWithConfig(
+  config: JiraConfig,
+  method: string,
+  endpoint: string,
+  body?: unknown
+): Promise<globalThis.Response> {
+  const url = `${config.instanceUrl}/rest/api/3${endpoint}`;
+  const authHeader = `Basic ${Buffer.from(`${config.email}:${config.apiToken}`).toString("base64")}`;
 
   const options: RequestInit = {
     method,
@@ -123,6 +141,29 @@ async function makeJiraRequest(
   }
 
   return fetch(url, options);
+}
+
+/**
+ * Resolve credentials used for sync execution.
+ * Prefer bot credentials from env for consistent behavior across users.
+ */
+function getSyncJiraConfig(): JiraConfig {
+  const instanceUrl = process.env.JIRA_SYNC_INSTANCE_URL;
+  const email = process.env.JIRA_SYNC_EMAIL;
+  const apiToken = process.env.JIRA_SYNC_API_TOKEN;
+
+  // Use dedicated sync/bot identity only when explicitly configured.
+  // Otherwise fall back to currently configured Jira identity (jiraConfig).
+  if (instanceUrl && email && apiToken) {
+    return {
+      instanceUrl: instanceUrl.replace(/\/$/, ""),
+      email,
+      apiToken,
+    };
+  }
+
+  if (jiraConfig) return jiraConfig;
+  throw new Error("Jira configuration not found");
 }
 
 /** Make a request to the Jira Agile API (/rest/agile/1.0) */
@@ -701,7 +742,7 @@ interface SyncRecord {
   id: string;
   sourceKey: string;
   targetKey: string;
-  direction: "to-zlmc" | "to-z10";
+  direction: string;
   commentId: string;
   originalComment: string;
   transformedComment: string;
@@ -806,33 +847,61 @@ function extractADFText(body: unknown): string {
 /** Extract @mentioned display names from ADF */
 function extractMentions(body: unknown): string[] {
   const mentions: string[] = [];
-  if (typeof body !== "object" || body === null) return mentions;
-  const walk = (nodes: unknown[]) => {
-    for (const node of nodes as Array<{ type?: string; attrs?: { text?: string }; content?: unknown[] }>) {
-      if (node.type === "mention" && node.attrs?.text) {
-        mentions.push(node.attrs.text.replace(/^@/, "").trim());
-      }
-      if (node.content) walk(node.content);
+
+  function walk(node: unknown) {
+    if (!node || typeof node !== "object") return;
+
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
     }
-  };
-  const adf = body as { content?: unknown[] };
-  if (adf.content) walk(adf.content);
-  return mentions;
+
+    const obj = node as Record<string, unknown>;
+
+    if (
+      obj.type === "mention" &&
+      typeof (obj.attrs as any)?.text === "string"
+    ) {
+      mentions.push(
+        ((obj.attrs as any).text as string)
+          .replace(/^@/, "")
+          .trim()
+      );
+    }
+
+    Object.values(obj).forEach(walk);
+  }
+
+  walk(body);
+  return [...new Set(mentions)];
 }
 
 /** Extract accountIds of @mentioned users from ADF */
 function extractMentionAccountIds(body: unknown): string[] {
   const ids: string[] = [];
-  if (typeof body !== "object" || body === null) return ids;
-  const walk = (nodes: unknown[]) => {
-    for (const node of nodes as Array<{ type?: string; attrs?: { id?: string }; content?: unknown[] }>) {
-      if (node.type === "mention" && node.attrs?.id) ids.push(node.attrs.id);
-      if (node.content) walk(node.content);
+
+  function walk(node: unknown) {
+    if (!node || typeof node !== "object") return;
+
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
     }
-  };
-  const adf = body as { content?: unknown[] };
-  if (adf.content) walk(adf.content);
-  return ids;
+
+    const obj = node as Record<string, unknown>;
+
+    if (
+      obj.type === "mention" &&
+      typeof (obj.attrs as any)?.id === "string"
+    ) {
+      ids.push((obj.attrs as any).id);
+    }
+
+    Object.values(obj).forEach(walk);
+  }
+
+  walk(body);
+  return [...new Set(ids)];
 }
 
 // ─── ADF → HTML renderer ─────────────────────────────────────────────────────
@@ -967,6 +1036,90 @@ function extractCommentMediaInfo(body: unknown): { mediaCount: number; links: st
   return { mediaCount, links };
 }
 
+/** Extract source media IDs from ADF in document order */
+function extractMediaIdsFromADF(body: unknown): string[] {
+  const ids: string[] = [];
+  if (typeof body !== "object" || body === null) return ids;
+  const walk = (nodes: unknown[]) => {
+    for (const node of nodes as Array<Record<string, unknown>>) {
+      if (node.type === "media") {
+        const id = (node.attrs as Record<string, unknown> | undefined)?.id;
+        if (typeof id === "string" && id.trim()) ids.push(id);
+      }
+      if (node.content) walk(node.content as unknown[]);
+    }
+  };
+  const adfBody = body as { content?: unknown[] };
+  if (adfBody.content) walk(adfBody.content);
+  return ids;
+}
+
+/** Extract Jira attachment IDs referenced in ADF links/cards/text links */
+function extractAttachmentIdsFromADF(body: unknown): string[] {
+  const ids = new Set<string>();
+  if (typeof body !== "object" || body === null) return [];
+  const addFromUrl = (url: string) => {
+    const patterns = [
+      /\/rest\/api\/3\/attachment\/content\/(\d+)/i,
+      /\/secure\/attachment\/(\d+)\//i,
+      /[?&]attachmentId=(\d+)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match?.[1]) ids.add(match[1]);
+    }
+  };
+  const walk = (nodes: unknown[]) => {
+    for (const node of nodes as Array<Record<string, unknown>>) {
+      if (node.type === "inlineCard") {
+        const url = (node.attrs as Record<string, unknown> | undefined)?.url;
+        if (typeof url === "string") addFromUrl(url);
+      }
+      if (node.type === "text") {
+        const marks = (node.marks as Array<Record<string, unknown>> | undefined) || [];
+        for (const mark of marks) {
+          if (mark.type !== "link") continue;
+          const href = (mark.attrs as Record<string, unknown> | undefined)?.href;
+          if (typeof href === "string") addFromUrl(href);
+        }
+      }
+      if (node.content) walk(node.content as unknown[]);
+    }
+  };
+  const adfBody = body as { content?: unknown[] };
+  if (adfBody.content) walk(adfBody.content);
+  return Array.from(ids);
+}
+
+function pickLikelyMediaAttachmentsForComment(
+  issueAttachments: Array<{ id: string; filename: string; mimeType: string; mediaApiFileId?: string; created?: string; author?: { accountId?: string } }>,
+  sourceMediaCount: number,
+  commentCreatedAt?: string,
+  commentAuthorId?: string
+): Array<{ id: string; filename: string; mimeType: string; mediaApiFileId?: string; created?: string; author?: { accountId?: string } }> {
+  if (sourceMediaCount <= 0) return [];
+  let candidates = issueAttachments.filter((a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"));
+  if (candidates.length === 0) return [];
+
+  if (commentAuthorId) {
+    const byAuthor = candidates.filter((a) => a.author?.accountId === commentAuthorId);
+    if (byAuthor.length > 0) candidates = byAuthor;
+  }
+
+  const commentTime = commentCreatedAt ? new Date(commentCreatedAt).getTime() : NaN;
+  if (!Number.isNaN(commentTime)) {
+    candidates = candidates
+      .map((att) => ({
+        att,
+        delta: Math.abs((att.created ? new Date(att.created).getTime() : commentTime) - commentTime),
+      }))
+      .sort((x, y) => x.delta - y.delta)
+      .map((x) => x.att);
+  }
+
+  return candidates.slice(0, sourceMediaCount);
+}
+
 /** Fix media collection IDs so inline images render on the destination ticket */
 function remapMediaCollections(node: unknown, destIssueId: string): unknown {
   if (typeof node !== "object" || node === null) return node;
@@ -986,30 +1139,180 @@ function remapMediaCollections(node: unknown, destIssueId: string): unknown {
   return result;
 }
 
-/** Fire-and-forget: copy source attachments to destination ticket */
+/**
+ * Remap ADF media node IDs to use newly uploaded destination attachment UUIDs.
+ * Media nodes whose source mediaApiFileId has no mapping are stripped to prevent ATTACHMENT_VALIDATION_ERROR.
+ */
+function remapMediaIds(
+  node: unknown,
+  idMap: Map<string, string>,
+  _destIssueNumericId: string
+): unknown {
+  if (typeof node !== "object" || node === null) return node;
+  if (Array.isArray(node)) {
+    return (node as unknown[]).map((n) => remapMediaIds(n, idMap, _destIssueNumericId)).filter(Boolean);
+  }
+  const n = node as Record<string, unknown>;
+  // Leaf media node: remap ID or strip if unmappable
+  if (n.type === "media") {
+    const attrs = (n.attrs || {}) as Record<string, unknown>;
+    if ((attrs.type === "link" || attrs.type === "external") && typeof attrs.url === "string") return n;
+    const oldId = attrs.id as string | undefined;
+    if (!oldId) return null;
+    const newId = idMap.get(oldId);
+    if (!newId) return null; // no mapping — strip to avoid ATTACHMENT_VALIDATION_ERROR
+    return { ...n, attrs: { ...attrs, id: newId, type: "file", collection: "" } };
+  }
+  // Container media nodes: recurse, drop the container if all children were stripped
+  if (n.type === "mediaSingle" || n.type === "mediaGroup") {
+    const remappedContent = ((n.content as unknown[]) || [])
+      .map((c) => remapMediaIds(c, idMap, _destIssueNumericId))
+      .filter(Boolean);
+    if (remappedContent.length === 0) return null;
+    return { ...n, content: remappedContent };
+  }
+  // All other nodes: recurse into content
+  if (n.content && Array.isArray(n.content)) {
+    return { ...n, content: (n.content as unknown[]).map((c) => remapMediaIds(c, idMap, _destIssueNumericId)).filter(Boolean) };
+  }
+  return n;
+}
+
+/** Copy source attachments to destination ticket and return media ID mapping metadata for ADF remapping. */
 async function copyAttachmentsToDestination(
+  syncConfig: JiraConfig,
   _sourceKey: string,
   destKey: string,
-  attachments: Array<{ id: string; filename: string; mimeType: string }>
-): Promise<void> {
-  if (!jiraConfig || attachments.length === 0) return;
-  const authHeader = `Basic ${Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString("base64")}`;
-  for (const att of attachments) {
-    try {
-      const downloadRes = await fetch(`${jiraConfig.instanceUrl}/rest/api/3/attachment/content/${att.id}`, {
-        headers: { Authorization: authHeader },
-      });
-      if (!downloadRes.ok) continue;
-      const buffer = await downloadRes.arrayBuffer();
-      const formData = new FormData();
-      formData.append("file", new Blob([buffer], { type: att.mimeType }), att.filename);
-      await fetch(`${jiraConfig.instanceUrl}/rest/api/3/issue/${destKey}/attachments`, {
-        method: "POST",
-        headers: { Authorization: authHeader, "X-Atlassian-Token": "no-check" },
-        body: formData,
-      });
-    } catch {}
+  attachments: Array<{ id: string; filename: string; mimeType: string; mediaApiFileId?: string }>
+): Promise<{
+  mediaIdMap: Map<string, string>;
+  uploadedMediaIdsInOrder: string[];
+  uploadedMedia: Array<{
+    mediaId?: string;
+    sourceMediaId?: string;
+    mimeType: string;
+    filename: string;
+    attachmentId?: string;
+    url?: string;
+  }>;
+}> {
+  const mediaIdMap = new Map<string, string>();
+  if (attachments.length === 0) {
+    return { mediaIdMap, uploadedMediaIdsInOrder: [], uploadedMedia: [] };
   }
+  const authHeader = `Basic ${Buffer.from(`${syncConfig.email}:${syncConfig.apiToken}`).toString("base64")}`;
+  const fetchMediaIdForAttachment = async (attachmentId: string): Promise<string | undefined> => {
+    try {
+      const detailRes = await fetch(
+        `${syncConfig.instanceUrl}/rest/api/3/attachment/${attachmentId}`,
+        { headers: { Authorization: authHeader, "Content-Type": "application/json" } }
+      );
+      if (!detailRes.ok) return undefined;
+      const detail = await detailRes.json() as { mediaApiFileId?: string };
+      return detail.mediaApiFileId;
+    } catch {
+      return undefined;
+    }
+  };
+  const uploadResults = await Promise.all(
+    attachments.map(async (att) => {
+      try {
+        const downloadRes = await fetch(
+          `${syncConfig.instanceUrl}/rest/api/3/attachment/content/${att.id}`,
+          { headers: { Authorization: authHeader } }
+        );
+        if (!downloadRes.ok) {
+          console.warn(`[ATTACH] Failed to download ${att.filename}: ${downloadRes.status}`);
+          return {
+            sourceMediaId: att.mediaApiFileId,
+            destMediaId: undefined as string | undefined,
+            destAttachmentId: undefined as string | undefined,
+            filename: att.filename,
+          };
+        }
+        const buffer = await downloadRes.arrayBuffer();
+        const formData = new FormData();
+        formData.append("file", new Blob([buffer], { type: att.mimeType }), att.filename);
+        const uploadRes = await fetch(
+          `${syncConfig.instanceUrl}/rest/api/3/issue/${destKey}/attachments`,
+          {
+            method: "POST",
+            headers: { Authorization: authHeader, "X-Atlassian-Token": "no-check" },
+            body: formData,
+          }
+        );
+        if (uploadRes.ok) {
+          const uploadedList = await uploadRes.json() as Array<{ id?: string | number; mediaApiFileId?: string }>;
+          const uploadedAttachmentId = uploadedList[0]?.id != null ? String(uploadedList[0].id) : undefined;
+          let newMediaId = uploadedList[0]?.mediaApiFileId;
+          if (!newMediaId && uploadedAttachmentId) {
+            newMediaId = await fetchMediaIdForAttachment(uploadedAttachmentId);
+            if (newMediaId) {
+              writeSyncLog(`[ATTACH] Recovered mediaApiFileId for ${att.filename} via attachment detail API`);
+            }
+          }
+          writeSyncLog(`[ATTACH] ✅ Copied ${att.filename}${att.mediaApiFileId && newMediaId ? " (media ID remapped)" : ""}`);
+          return {
+            sourceMediaId: att.mediaApiFileId,
+            destMediaId: newMediaId,
+            destAttachmentId: uploadedAttachmentId,
+            filename: att.filename,
+          };
+        } else {
+          writeSyncLog(`[ATTACH] Failed to upload ${att.filename}: ${uploadRes.status}`);
+          return {
+            sourceMediaId: att.mediaApiFileId,
+            destMediaId: undefined as string | undefined,
+            destAttachmentId: undefined as string | undefined,
+            filename: att.filename,
+          };
+        }
+      } catch (e) {
+        writeSyncLog(`[ATTACH] Error copying ${att.filename}: ${String(e)}`);
+        return {
+          sourceMediaId: att.mediaApiFileId,
+          destMediaId: undefined as string | undefined,
+          destAttachmentId: undefined as string | undefined,
+          filename: att.filename,
+        };
+      }
+    })
+  );
+  const uploadedMediaIdsInOrder: string[] = [];
+  const uploadedMedia: Array<{
+    mediaId?: string;
+    sourceMediaId?: string;
+    mimeType: string;
+    filename: string;
+    attachmentId?: string;
+    url?: string;
+  }> = [];
+  for (const result of uploadResults) {
+    if (!result) continue;
+    if (result.sourceMediaId && result.destMediaId) {
+      mediaIdMap.set(result.sourceMediaId, result.destMediaId);
+    }
+    if (result.destMediaId) uploadedMediaIdsInOrder.push(result.destMediaId);
+  }
+  for (let i = 0; i < uploadResults.length; i++) {
+    const result = uploadResults[i];
+    const att = attachments[i];
+    if (!result || !att) continue;
+    const attachmentId = result.destAttachmentId as string | undefined;
+    const filename = (result.filename as string | undefined) || att.filename;
+    const url = attachmentId
+      ? `${syncConfig.instanceUrl}/secure/attachment/${attachmentId}/${encodeURIComponent(filename)}`
+      : undefined;
+    uploadedMedia.push({
+      mediaId: result.destMediaId,
+      sourceMediaId: result.sourceMediaId,
+      mimeType: att.mimeType,
+      filename,
+      attachmentId,
+      url,
+    });
+  }
+  return { mediaIdMap, uploadedMediaIdsInOrder, uploadedMedia };
 }
 
 /** Strip #update hashtag text nodes from ADF before posting to destination */
@@ -1026,6 +1329,35 @@ function removeHashtagFromADF(node: unknown): unknown {
     return { ...n, content: (n.content as unknown[]).map((c) => removeHashtagFromADF(c)).filter(Boolean) };
   }
   return n;
+}
+
+/** Remove media/attachment nodes from ADF to prevent validation errors */
+function stripMediaNodes(node: unknown): unknown {
+  if (typeof node !== "object" || node === null) return node;
+  if (Array.isArray(node)) return (node as unknown[]).map((n) => stripMediaNodes(n)).filter(Boolean);
+  const n = node as Record<string, unknown>;
+  // Skip media nodes entirely
+  if (n.type === "mediaSingle" || n.type === "media" || n.type === "mediaGroup") return null;
+  if (n.content && Array.isArray(n.content)) {
+    return { ...n, content: (n.content as unknown[]).map((c) => stripMediaNodes(c)).filter(Boolean) };
+  }
+  return n;
+}
+
+/** Remove block nodes with empty content arrays — Jira ADF validator rejects them */
+function filterEmptyBlocks(nodes: unknown[]): unknown[] {
+  const BLOCK_TYPES = new Set(["paragraph", "heading", "bulletList", "orderedList", "listItem", "blockquote", "codeBlock"]);
+  return (nodes as Array<Record<string, unknown>>).reduce<unknown[]>((acc, node) => {
+    if (typeof node !== "object" || node === null) return acc;
+    if (Array.isArray((node as Record<string, unknown>).content)) {
+      const filteredContent = filterEmptyBlocks((node as Record<string, unknown>).content as unknown[]);
+      if (BLOCK_TYPES.has((node as Record<string, unknown>).type as string) && filteredContent.length === 0) return acc;
+      acc.push({ ...(node as Record<string, unknown>), content: filteredContent });
+    } else {
+      acc.push(node);
+    }
+    return acc;
+  }, []);
 }
 
 /** Use OpenAI to rewrite a comment for the target audience */
@@ -1110,24 +1442,37 @@ async function internalSyncComment(
   commentId: string,
   author: string
 ): Promise<SyncRecord> {
+  const syncConfig = getSyncJiraConfig();
+
   // Direction is determined by source project — no hashtag ambiguity
   const isFromZLMC = /^Z10LMC-/i.test(issueKey);
   const direction = isFromZLMC ? "to-z10" : "to-zlmc";
 
   console.log(`[SYNC] Fetching issue ${issueKey} + raw comment body`);
   const [issueRes, commentRes] = await Promise.all([
-    makeJiraRequest("GET", `/issue/${issueKey}?fields=summary,issuelinks,attachment`),
-    commentId ? makeJiraRequest("GET", `/issue/${issueKey}/comment/${commentId}`) : Promise.resolve(null),
+    makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${issueKey}?fields=summary,issuelinks,attachment`),
+    commentId ? makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${issueKey}/comment/${commentId}`) : Promise.resolve(null),
   ]);
   if (!issueRes.ok) throw new Error(`Failed to fetch issue ${issueKey} (${issueRes.status})`);
   const issueData = await issueRes.json();
-  const issueAttachments: Array<{ id: string; filename: string; mimeType: string }> = issueData.fields?.attachment || [];
+  const issueAttachments: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    mediaApiFileId?: string;
+    created?: string;
+    author?: { accountId?: string };
+  }> = issueData.fields?.attachment || [];
 
   // Get raw ADF body
   let rawADFBody: unknown = null;
+  let sourceCommentCreatedAt = "";
+  let sourceCommentAuthorId = "";
   if (commentRes && commentRes.ok) {
-    const cd = await commentRes.json();
+    const cd = await commentRes.json() as { body?: unknown; created?: string; author?: { accountId?: string } };
     rawADFBody = cd.body || null;
+    sourceCommentCreatedAt = cd.created || "";
+    sourceCommentAuthorId = cd.author?.accountId || "";
   }
 
   // Find the clone-linked ticket — any project, just must be a "clones"/"is cloned by" link
@@ -1154,7 +1499,7 @@ async function internalSyncComment(
   }
 
   // Fetch destination issue to get reporter + last commenter for @mention notification
-  const destRes = await makeJiraRequest("GET", `/issue/${linkedKey}?fields=reporter,comment`);
+  const destRes = await makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${linkedKey}?fields=reporter,comment`);
   const destData = destRes.ok ? await destRes.json() : null;
   const destReporter = destData?.fields?.reporter as { accountId?: string; displayName?: string } | null;
   const destComments: unknown[] = destData?.fields?.comment?.comments || [];
@@ -1178,15 +1523,138 @@ async function internalSyncComment(
     ? [{ type: "paragraph", content: [{ type: "text", text: "FYI: " }, ...mentionNodes, { type: "text", text: ` — update from ${issueKey}:` }] }]
     : [];
 
-  // Build body content: strip #update from original ADF, remap media collections
+  // Upload attachments to destination first and capture the sourceMediaApiFileId → destMediaApiFileId
+  // mapping. This is what allows images to appear inline (embedded) in the destination comment.
+  const destIssueNumericId: string = String(destData?.id || "");
+  const sourceMediaIds = rawADFBody ? extractMediaIdsFromADF(rawADFBody) : [];
+  const sourceAttachmentIds = rawADFBody ? extractAttachmentIdsFromADF(rawADFBody) : [];
+  const sourceMediaIdSet = new Set(sourceMediaIds);
+  const sourceAttachmentIdSet = new Set(sourceAttachmentIds);
+  const directMatchedAttachments = issueAttachments.filter((att) =>
+    (att.mediaApiFileId ? sourceMediaIdSet.has(att.mediaApiFileId) : false) ||
+    sourceAttachmentIdSet.has(att.id)
+  );
+
+  const fallbackAttachments = directMatchedAttachments.length === 0
+    ? pickLikelyMediaAttachmentsForComment(
+        issueAttachments,
+        sourceMediaIds.length,
+        sourceCommentCreatedAt,
+        sourceCommentAuthorId
+      )
+    : [];
+
+  const commentAttachments = directMatchedAttachments.length > 0
+    ? directMatchedAttachments
+    : fallbackAttachments;
+
+  const copyResult = commentAttachments.length > 0
+    ? await copyAttachmentsToDestination(syncConfig, issueKey, linkedKey, commentAttachments)
+    : { mediaIdMap: new Map<string, string>(), uploadedMediaIdsInOrder: [], uploadedMedia: [] };
+
+  writeSyncLog(
+    `[SYNC] Comment-specific attachments on ${issueKey}: ${commentAttachments.length}/${issueAttachments.length}`
+  );
+  if (directMatchedAttachments.length === 0 && fallbackAttachments.length > 0) {
+    writeSyncLog(`[SYNC] Used fallback attachment matching for ${fallbackAttachments.length} media item(s) on ${issueKey}`);
+  }
+
+  // Primary mapping uses source attachment mediaApiFileId -> uploaded mediaApiFileId
+  // Fallback mapping uses ADF media node order when source mediaApiFileId is unavailable.
+  const mediaIdMap = new Map<string, string>(copyResult.mediaIdMap);
+  if (sourceMediaIds.length > 0 && copyResult.uploadedMediaIdsInOrder.length > 0) {
+    const alreadyMappedTargets = new Set(Array.from(mediaIdMap.keys()));
+    const unmappedSourceIds = sourceMediaIds.filter((id) => !alreadyMappedTargets.has(id));
+    const maxPairs = Math.min(unmappedSourceIds.length, copyResult.uploadedMediaIdsInOrder.length);
+    for (let i = 0; i < maxPairs; i++) {
+      mediaIdMap.set(unmappedSourceIds[i], copyResult.uploadedMediaIdsInOrder[i]);
+    }
+    if (maxPairs > 0) {
+      writeSyncLog(`[SYNC] Applied fallback media remap for ${maxPairs} inline media node(s) on ${issueKey}`);
+    }
+  }
+
+  // Build body content: strip #update hashtag, remap media node IDs so images are embedded inline
   let bodyContent: unknown[];
   if (rawADFBody && typeof rawADFBody === "object" && (rawADFBody as Record<string, unknown>).type === "doc") {
     const cleaned = removeHashtagFromADF(rawADFBody) as Record<string, unknown>;
-    const remapped = remapMediaCollections(cleaned, linkedKey) as Record<string, unknown>;
-    bodyContent = (remapped.content as unknown[]) || [];
+    const remapped = remapMediaIds(cleaned, mediaIdMap, destIssueNumericId) as Record<string, unknown>;
+    bodyContent = filterEmptyBlocks((remapped.content as unknown[]) || []);
   } else {
     const cleaned = commentBody.replace(/#update\b/gi, "").trim();
     bodyContent = [{ type: "paragraph", content: [{ type: "text", text: cleaned }] }];
+  }
+
+  // Safety: ensure ADF body is never empty — Jira rejects a doc with no content
+  if (bodyContent.length === 0) {
+    bodyContent = [{ type: "paragraph", content: [{ type: "text", text: "(no content)" }] }];
+  }
+
+  // Inline media fallback:
+  // If remap did not preserve all visuals, append missing ones using destination media IDs.
+  // This keeps ADF valid (type=file with known destination media IDs) and avoids external URL issues.
+  if (copyResult.uploadedMedia.length > 0) {
+    const currentMediaCount = extractCommentMediaInfo({ type: "doc", content: bodyContent }).mediaCount;
+    const usedDestMediaIds = new Set(Array.from(mediaIdMap.values()));
+    const candidateFileMedia = copyResult.uploadedMedia.filter((m) => {
+      const isVisual = m.mimeType.startsWith("image/") || m.mimeType.startsWith("video/");
+      if (!isVisual || !m.mediaId) return false;
+      if (sourceMediaIds.length === 0) return true;
+      return !usedDestMediaIds.has(m.mediaId);
+    });
+
+    const candidateExternalMedia = copyResult.uploadedMedia.filter((m) => {
+      const isVisual = m.mimeType.startsWith("image/") || m.mimeType.startsWith("video/");
+      if (!isVisual || !m.url) return false;
+      if (m.mediaId && usedDestMediaIds.has(m.mediaId)) return false;
+      return true;
+    });
+
+    const maxAvailable = Math.max(candidateFileMedia.length, candidateExternalMedia.length);
+
+    const targetAppendCount = sourceMediaIds.length > 0
+      ? Math.max(0, sourceMediaIds.length - currentMediaCount)
+      : (currentMediaCount === 0 ? maxAvailable : 0);
+
+    const fileFallbackMedia = candidateFileMedia.slice(0, targetAppendCount);
+    const remaining = Math.max(0, targetAppendCount - fileFallbackMedia.length);
+    const externalFallbackMedia = candidateExternalMedia.slice(0, remaining);
+
+    if (fileFallbackMedia.length > 0 || externalFallbackMedia.length > 0) {
+      bodyContent = [
+        ...bodyContent,
+        ...fileFallbackMedia.map((m) => ({
+          type: "mediaSingle",
+          attrs: { layout: "center" },
+          content: [
+            {
+              type: "media",
+              attrs: {
+                id: m.mediaId,
+                type: "file",
+                collection: "",
+              },
+            },
+          ],
+        })),
+        ...externalFallbackMedia.map((m) => ({
+          type: "mediaSingle",
+          attrs: { layout: "center" },
+          content: [
+            {
+              type: "media",
+              attrs: {
+                type: "external",
+                url: m.url,
+              },
+            },
+          ],
+        })),
+      ];
+      writeSyncLog(
+        `[SYNC] Appended inline media on ${issueKey}: file=${fileFallbackMedia.length}, external=${externalFallbackMedia.length}, target=${targetAppendCount}`
+      );
+    }
   }
 
   const attributionParagraph = {
@@ -1194,14 +1662,13 @@ async function internalSyncComment(
     content: [{ type: "text", text: `Posted by JiraTriage · ${issueKey}`, marks: [{ type: "em" }] }],
   };
 
-  const postRes = await makeJiraRequest("POST", `/issue/${linkedKey}/comment`, {
+  const postRes = await makeJiraRequestWithConfig(syncConfig, "POST", `/issue/${linkedKey}/comment`, {
     body: { type: "doc", version: 1, content: [...notifParagraph, ...bodyContent, attributionParagraph] },
   });
   const postData = await postRes.json();
 
-  // Fire-and-forget attachment copy
-  if (postRes.ok && issueAttachments.length > 0) {
-    copyAttachmentsToDestination(issueKey, linkedKey, issueAttachments).catch(() => {});
+  if (!postRes.ok) {
+    writeSyncLog(`[SYNC] ❌ POST comment to ${linkedKey} failed (${postRes.status}): ${JSON.stringify(postData)}`);
   }
 
   const record: SyncRecord = {
@@ -1219,7 +1686,7 @@ async function internalSyncComment(
   };
 
   registerSyncRecord(record);
-  console.log(`[SYNC] ${record.status.toUpperCase()} — ${issueKey} → ${linkedKey}`);
+  writeSyncLog(`[SYNC] ${record.status.toUpperCase()} — ${issueKey} → ${linkedKey}`);
   return record;
 }
 
@@ -1232,7 +1699,7 @@ app.post(
   requireJiraConfig,
   async (req: Request, res: Response) => {
     try {
-      const { issueKey, commentBody, commentId = "", author = "Unknown" } = req.body;
+      const { issueKey, commentBody, commentId = "", author = "Unknown", authorizedToPost = true } = req.body;
 
       if (!issueKey || !commentBody) {
         return res.status(400).json({ error: "issueKey and commentBody are required" });
@@ -1245,6 +1712,14 @@ app.post(
       // Dedup by commentId
       if (commentId && isAlreadySynced(issueKey, commentId)) {
         return res.status(409).json({ error: "This comment has already been synced.", alreadySynced: true });
+      }
+
+      // Authorization check: frontend already validated this during discovery
+      if (!authorizedToPost) {
+        return res.status(403).json({
+          error: "Not authorized to post this comment. Only the author, mentioned users, or board admins can sync.",
+          authorized: false,
+        });
       }
 
       const record = await internalSyncComment(issueKey, commentBody, commentId, author);
@@ -1402,9 +1877,10 @@ app.post(
 
       // Get current user + board admin cache in parallel
       let currentUserAccountId = "";
+      let currentUserDisplayName = "";
       await Promise.allSettled([
         makeJiraRequest("GET", "/myself").then(async (r) => {
-          if (r.ok) { const d = await r.json(); currentUserAccountId = d.accountId || ""; }
+          if (r.ok) { const d = await r.json(); currentUserAccountId = d.accountId || ""; currentUserDisplayName = d.displayName || ""; }
         }),
         buildBoardAdminCache(projects),
       ]);
@@ -1463,13 +1939,19 @@ app.post(
             if (isAlreadySynced(key, c.id)) continue;
 
             const isAuthor = c.author?.accountId === currentUserAccountId;
-            const isMentioned = extractMentionAccountIds(c.body).includes(currentUserAccountId);
+            const mentionAccountIds = extractMentionAccountIds(c.body);
+            const mentionDisplayNames = extractMentions(c.body);
+            const isMentionedByAccountId = mentionAccountIds.includes(currentUserAccountId);
+            const isMentionedByName = mentionDisplayNames.some((m) => m.toLowerCase() === currentUserDisplayName.toLowerCase());
+            const isMentioned = isMentionedByAccountId || isMentionedByName;
             let authorizedToPost: boolean;
             if (isAuthor) authorizedToPost = true;
             else if (isMentioned) authorizedToPost = true;
             else if (boardAdminMap.size === 0) authorizedToPost = true;
             else if (issueBoardId !== null) authorizedToPost = boardAdmins?.has(currentUserAccountId) ?? false;
             else authorizedToPost = false;
+
+            console.log(`[AUTO-DISCOVER] ${key}::${c.id} | current user: "${currentUserDisplayName}" (${currentUserAccountId.slice(0, 8)}...) | mentions: [${mentionDisplayNames.join(", ")}] | isAuthor=${isAuthor}, isMentioned=${isMentioned}, authorized=${authorizedToPost}`);
 
             const { mediaCount, links } = extractCommentMediaInfo(c.body);
             const commentAttachments: Array<{ name: string; url: string | null }> = [];
@@ -1538,10 +2020,11 @@ app.post(
 
       // Get current user + board admin cache in parallel
       let pollCurrentUserAccountId = "";
+      let pollCurrentUserDisplayName = "";
       const pollProjects = [...new Set(issueKeys.map((k: string) => k.replace(/-\d+$/, "")))]; 
       await Promise.allSettled([
         makeJiraRequest("GET", "/myself").then(async (r) => {
-          if (r.ok) { const d = await r.json(); pollCurrentUserAccountId = d.accountId || ""; }
+          if (r.ok) { const d = await r.json(); pollCurrentUserAccountId = d.accountId || ""; pollCurrentUserDisplayName = d.displayName || ""; }
         }),
         buildBoardAdminCache(pollProjects),
       ]);
@@ -1601,13 +2084,19 @@ app.post(
             }
 
             const isAuthor = c.author?.accountId === pollCurrentUserAccountId;
-            const isMentioned = extractMentionAccountIds(c.body).includes(pollCurrentUserAccountId);
+            const mentionAccountIds = extractMentionAccountIds(c.body);
+            const mentionDisplayNames = extractMentions(c.body);
+            const isMentionedByAccountId = mentionAccountIds.includes(pollCurrentUserAccountId);
+            const isMentionedByName = mentionDisplayNames.some((m) => m.toLowerCase() === pollCurrentUserDisplayName.toLowerCase());
+            const isMentioned = isMentionedByAccountId || isMentionedByName;
             let authorizedToPost: boolean;
             if (isAuthor) authorizedToPost = true;
             else if (isMentioned) authorizedToPost = true;
             else if (boardAdminMap.size === 0) authorizedToPost = true;
             else if (issueBoardId !== null) authorizedToPost = boardAdmins?.has(pollCurrentUserAccountId) ?? false;
             else authorizedToPost = false;
+
+            console.log(`[POLL-SYNC] ${key}::${c.id} | current user: "${pollCurrentUserDisplayName}" (${pollCurrentUserAccountId.slice(0, 8)}...) | mentions: [${mentionDisplayNames.join(", ")}] | isAuthor=${isAuthor}, isMentioned=${isMentioned}, authorized=${authorizedToPost}`);
 
             const { mediaCount, links } = extractCommentMediaInfo(c.body);
             const commentAttachments: Array<{ name: string; url: string | null }> = [];
@@ -1664,6 +2153,27 @@ app.post(
  */
 app.get("/api/jira/sync-history", requireJiraConfig, (req: Request, res: Response) => {
   res.json({ history: syncHistory, total: syncHistory.length });
+});
+
+/**
+ * GET /api/jira/sync-debug-logs
+ * Return last N lines from sync-debug.log for troubleshooting.
+ */
+app.get("/api/jira/sync-debug-logs", requireJiraConfig, (req: Request, res: Response) => {
+  try {
+    const tailParam = Number(req.query.tail || 200);
+    const tail = Number.isFinite(tailParam) ? Math.max(1, Math.min(2000, tailParam)) : 200;
+    const exists = fs.existsSync(SYNC_LOG_FILE);
+    if (!exists) {
+      return res.json({ file: SYNC_LOG_FILE, lines: [], totalLines: 0 });
+    }
+    const raw = fs.readFileSync(SYNC_LOG_FILE, "utf-8");
+    const allLines = raw.split(/\r?\n/).filter(Boolean);
+    const lines = allLines.slice(-tail);
+    res.json({ file: SYNC_LOG_FILE, lines, totalLines: allLines.length });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to read sync logs" });
+  }
 });
 
 /**

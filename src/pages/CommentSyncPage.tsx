@@ -136,7 +136,7 @@ const CommentSyncPage = () => {
     const uid = `${comment.issueKey}-${comment.commentId}`;
     setSyncingId(uid);
     try {
-      await syncComment(comment.issueKey, comment.commentBody, comment.commentId, comment.author);
+      await syncComment(comment.issueKey, comment.commentBody, comment.commentId, comment.author, comment.authorizedToPost);
       setSuccessIds((prev) => new Set(prev).add(uid));
     } catch {
       // error shown via hook state
@@ -605,9 +605,9 @@ const CommentSyncPage = () => {
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">{formatRelative(record.timestamp)}</td>
                         <td className="py-3 px-4 text-center">
                           {record.status === "success" ? (
-                            <span className="inline-flex items-center gap-1 text-success"><Check className="h-3 w-3" /> Synced</span>
+                            <span className="inline-flex items-center gap-1 text-success"><Check className="h-3 w-3" /> Posted</span>
                           ) : (
-                            <span className="inline-flex items-center gap-1 text-destructive" title={record.error}><X className="h-3 w-3" /> Failed</span>
+                            <span className="inline-flex items-center gap-1 text-destructive" title={record.error ? `Error: ${record.error}` : "Failed"}><X className="h-3 w-3" /> Failed{record.error ? " ⓘ" : ""}</span>
                           )}
                         </td>
                       </tr>
