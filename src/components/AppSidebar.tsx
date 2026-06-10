@@ -86,7 +86,6 @@ export function AppSidebar() {
           {!collapsed && (
             <div>
               <h2 className="text-sm font-semibold text-foreground">JiraTriage</h2>
-              <p className="text-xs text-muted-foreground">SignalOps</p>
             </div>
           )}
         </div>

@@ -30,6 +30,7 @@ const DIRECTION_TAG: Record<string, string> = {
 
 /** How often to auto-discover (ms) */
 const AUTO_POLL_INTERVAL = 30_000;
+const COMMENT_SYNC_FILTER_STORAGE_KEY = "comment_sync_filtered_projects";
 
 function formatRelative(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
@@ -46,6 +47,10 @@ function formatTime(d: Date): string {
 
 function escRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getIssueProjectKey(issueKey: string): string {
+  return (issueKey.split("-")[0] || "").toUpperCase();
 }
 
 const CommentSyncPage = () => {
@@ -81,7 +86,16 @@ const CommentSyncPage = () => {
   const [mentionFilterEnabled, setMentionFilterEnabled] = useState(false);
 
   const { selectedProjects: selectedProjectKeys } = useSelectedProjects();
-  const [filteredProjectKeys, setFilteredProjectKeys] = useState<string[]>(selectedProjectKeys);
+  const [filteredProjectKeys, setFilteredProjectKeys] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(COMMENT_SYNC_FILTER_STORAGE_KEY);
+      if (!raw) return selectedProjectKeys;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : selectedProjectKeys;
+    } catch {
+      return selectedProjectKeys;
+    }
+  });
 
   useEffect(() => {
     setFilteredProjectKeys((prev) => {
@@ -89,6 +103,14 @@ const CommentSyncPage = () => {
       return next.length > 0 ? next : selectedProjectKeys;
     });
   }, [selectedProjectKeys]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(COMMENT_SYNC_FILTER_STORAGE_KEY, JSON.stringify(filteredProjectKeys));
+    } catch {
+      // ignore storage failures
+    }
+  }, [filteredProjectKeys]);
 
   const { config: jiraConfig } = useJiraConfig();
   const ticketUrl = (key: string) =>
@@ -218,8 +240,12 @@ const CommentSyncPage = () => {
 
   const authorizedVisible = visibleComments.filter((c) => c.authorizedToPost);
 
+  const selectedProjectSet = new Set(filteredProjectKeys.map((key) => key.toUpperCase()));
+
   const relevantSyncHistory = currentUserName
     ? syncHistory.filter((record) => {
+        const sourceProject = getIssueProjectKey(record.sourceKey);
+        if (!selectedProjectSet.has(sourceProject)) return false;
         const name = currentUserName.trim();
         const isAuthor = (record.author || "").trim().toLowerCase() === name.toLowerCase();
         if (isAuthor) return true;
@@ -227,6 +253,18 @@ const CommentSyncPage = () => {
         return mentionRegex.test(record.originalComment || "") || mentionRegex.test(record.transformedComment || "");
       })
     : [];
+
+  const myActionHistory = currentUserName
+    ? syncHistory.filter((record) => {
+        const sourceProject = getIssueProjectKey(record.sourceKey);
+        if (!selectedProjectSet.has(sourceProject)) return false;
+        const name = currentUserName.trim().toLowerCase();
+        return (record.syncedBy || "").trim().toLowerCase() === name;
+      })
+    : [];
+
+  const mySyncedCount = myActionHistory.filter((record) => record.status === "success").length;
+  const myFailedCount = myActionHistory.filter((record) => record.status === "failed").length;
 
   useEffect(() => {
     setHistoryPage(1);
@@ -303,7 +341,7 @@ const CommentSyncPage = () => {
           <div className="rounded bg-card border border-border border-l-4 border-l-success p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Synced</p>
             <p className="text-2xl font-bold text-foreground mt-1">
-              {syncHistory.filter((r) => r.status === "success").length}
+              {mySyncedCount}
             </p>
           </div>
           <div className="rounded bg-card border border-border border-l-4 border-l-warning p-4">
@@ -313,7 +351,7 @@ const CommentSyncPage = () => {
           <div className="rounded bg-card border border-border border-l-4 border-l-destructive p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide">Failed</p>
             <p className="text-2xl font-bold text-foreground mt-1">
-              {syncHistory.filter((r) => r.status === "failed").length}
+              {myFailedCount}
             </p>
           </div>
         </div>

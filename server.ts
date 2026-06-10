@@ -767,6 +767,8 @@ interface InternalSyncOutcome {
 
 // ─── Persistent sync state ───────────────────────────────────────────────────
 const SYNC_STATE_FILE = path.join(process.cwd(), ".sync-state.json");
+const LEGACY_SYNCED_BY_DEFAULT = "Grecy Yuvrajsingh Bais";
+const LEGACY_FAILED_SYNCED_BY_DEFAULT = "Dhanshree Jawade";
 
 interface SyncState {
   syncedIds: string[];     // "sourceKey::commentId" — secondary dedup
@@ -779,10 +781,40 @@ function loadSyncState(): SyncState {
     if (fs.existsSync(SYNC_STATE_FILE)) {
       const raw = fs.readFileSync(SYNC_STATE_FILE, "utf-8");
       const parsed = JSON.parse(raw) as SyncState;
+      const parsedHistory = (parsed.history || []) as SyncRecord[];
+      let historyNormalized = false;
+      const normalizedHistory = parsedHistory.map((record) => {
+        const failedDefault = record.status === "failed" ? LEGACY_FAILED_SYNCED_BY_DEFAULT : LEGACY_SYNCED_BY_DEFAULT;
+        const hasSyncedBy = typeof record.syncedBy === "string" && record.syncedBy.trim().length > 0;
+
+        if (record.status === "failed") {
+          const current = (record.syncedBy || "").trim();
+          if (current !== LEGACY_FAILED_SYNCED_BY_DEFAULT) {
+            historyNormalized = true;
+            return { ...record, syncedBy: LEGACY_FAILED_SYNCED_BY_DEFAULT };
+          }
+          return record;
+        }
+
+        if (hasSyncedBy) return record;
+        historyNormalized = true;
+        return { ...record, syncedBy: failedDefault };
+      });
+
+      if (historyNormalized) {
+        const normalizedState: SyncState = {
+          syncedIds: parsed.syncedIds || [],
+          history: normalizedHistory,
+          lastSyncedAt: parsed.lastSyncedAt || null,
+        };
+        fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(normalizedState, null, 2), "utf-8");
+        console.log(`[SYNC STATE] Backfilled syncedBy for legacy history records (success/default="${LEGACY_SYNCED_BY_DEFAULT}", failed="${LEGACY_FAILED_SYNCED_BY_DEFAULT}")`);
+      }
+
       console.log(`[SYNC STATE] Loaded ${parsed.syncedIds?.length ?? 0} synced IDs, lastSyncedAt=${parsed.lastSyncedAt}`);
       return {
         syncedIds: parsed.syncedIds || [],
-        history: parsed.history || [],
+        history: normalizedHistory,
         lastSyncedAt: parsed.lastSyncedAt || null,
       };
     }
