@@ -23,6 +23,7 @@ export interface SyncRecord {
   originalComment: string;
   transformedComment: string;
   author: string;
+  syncedBy?: string;
   timestamp: string;
   status: "success" | "failed";
   error?: string;
@@ -30,6 +31,7 @@ export interface SyncRecord {
 
 export interface PendingComment {
   issueKey: string;
+  targetKeys: string[];
   commentId: string;
   commentBody: string;
   commentBodyHtml: string;
@@ -71,7 +73,8 @@ export function useCommentSync() {
       commentBody: string,
       commentId: string,
       author = "Unknown",
-      authorizedToPost = true
+      authorizedToPost = true,
+      syncedBy?: string
     ): Promise<SyncRecord> => {
       setIsSyncing(true);
       setError(null);
@@ -79,7 +82,7 @@ export function useCommentSync() {
         const res = await fetch(`${API_BASE}/api/jira/sync-comment`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ issueKey, commentBody, commentId, author, authorizedToPost }),
+          body: JSON.stringify({ issueKey, commentBody, commentId, author, syncedBy, authorizedToPost }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Sync failed");
@@ -103,7 +106,7 @@ export function useCommentSync() {
 
   /** Bulk-sync all pending comments in a single request */
   const syncAll = useCallback(
-    async (comments: PendingComment[]): Promise<SyncAllSummary> => {
+    async (comments: PendingComment[], syncedBy?: string): Promise<SyncAllSummary> => {
       setIsSyncingAll(true);
       setError(null);
       try {
@@ -116,6 +119,7 @@ export function useCommentSync() {
               commentBody: c.commentBody,
               commentId: c.commentId,
               author: c.author,
+              syncedBy,
             })),
           }),
         });
@@ -172,6 +176,10 @@ export function useCommentSync() {
         return results;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Auto-discover failed";
+        if (/failed to fetch/i.test(msg)) {
+          setScanStats({ scanned: 0, found: 0 });
+          return [];
+        }
         setError(msg);
         throw e;
       } finally {
@@ -209,6 +217,10 @@ export function useCommentSync() {
         return results;
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Poll failed";
+        if (/failed to fetch/i.test(msg)) {
+          setScanStats({ scanned: 0, found: 0 });
+          return [];
+        }
         setError(msg);
         throw e;
       } finally {

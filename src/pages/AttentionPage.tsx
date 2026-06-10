@@ -10,6 +10,7 @@ import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 import { CommentsTimeline } from "@/components/CommentsTimeline";
 import { NewActivityTable } from "@/components/NewActivityTable";
 import { getJiraIssueUrl } from "@/lib/jira";
+import { SelectedProjectsFilterDropdown } from "@/components/SelectedProjectsFilterDropdown";
  
 const P1_DISMISSED_KEY = "p1_attention_dismissed";
 const UNATTENDED_DISMISSED_KEY = "p1_unattended_dismissed";
@@ -49,9 +50,18 @@ const AttentionPage = () => {
   const { data: currentJiraUser } = useCurrentJiraUser();
   const currentUserDisplayName = currentJiraUser?.displayName;
   const { selectedProjects, isConfigured } = useSelectedProjects();
-  const { data: analysisData, isLoading, error } = useTicketsWithAnalysis(daysWindow, selectedProjects, currentJiraUser ?? undefined);
-  const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1, currentUserDisplayName, selectedProjects);
-  const { data: unattendedData, isLoading: unattendedLoading } = useUnattendedTickets(daysWindow * 24, selectedProjects, currentJiraUser ?? undefined);
+  const [filteredProjectKeys, setFilteredProjectKeys] = useState<string[]>(selectedProjects);
+
+  useEffect(() => {
+    setFilteredProjectKeys((prev) => {
+      const next = prev.filter((k) => selectedProjects.includes(k));
+      return next.length > 0 ? next : selectedProjects;
+    });
+  }, [selectedProjects]);
+
+  const { data: analysisData, isLoading, error } = useTicketsWithAnalysis(daysWindow, filteredProjectKeys, currentJiraUser ?? undefined);
+  const { data: recentActivityData, isLoading: recentActivityLoading } = useRecentActivity(1, currentUserDisplayName, filteredProjectKeys);
+  const { data: unattendedData, isLoading: unattendedLoading } = useUnattendedTickets(daysWindow * 24, filteredProjectKeys, currentJiraUser ?? undefined);
   const attentionRequired = (analysisData?.attentionRequired || []).filter(t => !p1Dismissed[t.ticketKey]);
   const attentionCount = attentionRequired.length;
   const p1TotalPages = Math.ceil(attentionRequired.length / P1_PAGE_SIZE);
@@ -102,6 +112,11 @@ const AttentionPage = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <SelectedProjectsFilterDropdown
+              availableProjectKeys={selectedProjects}
+              selectedProjectKeys={filteredProjectKeys}
+              onSelectionChange={setFilteredProjectKeys}
+            />
             {/* Time Window Filter */}
             <div className="flex gap-2">
             <button

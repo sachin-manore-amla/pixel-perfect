@@ -1,9 +1,6 @@
 import {
-  LayoutDashboard,
-  AlertTriangle,
   Eye,
   MessageSquare,
-  Brain,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -31,10 +28,7 @@ interface JiraUser {
 }
 
 const navItems = [
-  { title: "Overview", url: "/", icon: LayoutDashboard },
-  { title: "P1 Triage", url: "/triage", icon: AlertTriangle },
   { title: "Attention", url: "/attention", icon: Eye },
-  { title: "AI Insights", url: "/ai-insights", icon: Brain },
   { title: "Comment Sync", url: "/sync", icon: MessageSquare },
 ];
 

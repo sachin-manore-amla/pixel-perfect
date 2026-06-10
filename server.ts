@@ -747,9 +747,22 @@ interface SyncRecord {
   originalComment: string;
   transformedComment: string;
   author: string;
+  syncedBy?: string;
   timestamp: string;
   status: "success" | "failed";
   error?: string;
+}
+
+interface SyncTargetFailure {
+  targetKey: string;
+  error: string;
+}
+
+interface InternalSyncOutcome {
+  primaryRecord: SyncRecord;
+  propagatedTargets: string[];
+  mandatoryFailures: SyncTargetFailure[];
+  secondaryFailures: SyncTargetFailure[];
 }
 
 // ─── Persistent sync state ───────────────────────────────────────────────────
@@ -1315,13 +1328,13 @@ async function copyAttachmentsToDestination(
   return { mediaIdMap, uploadedMediaIdsInOrder, uploadedMedia };
 }
 
-/** Strip #update hashtag text nodes from ADF before posting to destination */
+/** Strip #copycomment hashtag text nodes from ADF before posting to destination */
 function removeHashtagFromADF(node: unknown): unknown {
   if (typeof node !== "object" || node === null) return node;
   if (Array.isArray(node)) return (node as unknown[]).map((n) => removeHashtagFromADF(n)).filter(Boolean);
   const n = node as Record<string, unknown>;
   if (n.type === "text" && typeof n.text === "string") {
-    const cleaned = (n.text as string).replace(/#update\b/gi, "").replace(/\s{2,}/g, " ").trim();
+    const cleaned = (n.text as string).replace(/#copycomment\b/gi, "").replace(/\s{2,}/g, " ").trim();
     if (!cleaned) return null;
     return { ...n, text: cleaned };
   }
@@ -1436,19 +1449,44 @@ Rules:
 /**
  * Core sync logic — shared between single and bulk sync endpoints.
  */
-async function internalSyncComment(
+function extractCloneNeighborKeys(
+  links: Array<{
+    type?: { name?: string; inward?: string; outward?: string };
+    outwardIssue?: { key: string };
+    inwardIssue?: { key: string };
+  }>,
+  selfKey: string
+): string[] {
+  const neighbors: string[] = [];
+  for (const link of links) {
+    const typeName = (link.type?.name || "").toLowerCase();
+    const inward = (link.type?.inward || "").toLowerCase();
+    const outward = (link.type?.outward || "").toLowerCase();
+    const isCloneLink =
+      typeName.includes("clone") ||
+      inward.includes("clone") ||
+      outward.includes("clone");
+    if (!isCloneLink) continue;
+    const candidate = link.outwardIssue?.key || link.inwardIssue?.key;
+    if (candidate && candidate !== selfKey) neighbors.push(candidate);
+  }
+  return [...new Set(neighbors)];
+}
+
+async function syncCommentToTarget(
+  syncConfig: JiraConfig,
   issueKey: string,
+  linkedKey: string,
   commentBody: string,
   commentId: string,
-  author: string
+  author: string,
+  syncedBy?: string
 ): Promise<SyncRecord> {
-  const syncConfig = getSyncJiraConfig();
-
   // Direction is determined by source project — no hashtag ambiguity
   const isFromZLMC = /^Z10LMC-/i.test(issueKey);
   const direction = isFromZLMC ? "to-z10" : "to-zlmc";
 
-  console.log(`[SYNC] Fetching issue ${issueKey} + raw comment body`);
+  console.log(`[SYNC] Fetching issue ${issueKey} + raw comment body for target ${linkedKey}`);
   const [issueRes, commentRes] = await Promise.all([
     makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${issueKey}?fields=summary,issuelinks,attachment`),
     commentId ? makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${issueKey}/comment/${commentId}`) : Promise.resolve(null),
@@ -1473,29 +1511,6 @@ async function internalSyncComment(
     rawADFBody = cd.body || null;
     sourceCommentCreatedAt = cd.created || "";
     sourceCommentAuthorId = cd.author?.accountId || "";
-  }
-
-  // Find the clone-linked ticket — any project, just must be a "clones"/"is cloned by" link
-  const links: Array<{
-    type?: { name?: string; inward?: string; outward?: string };
-    outwardIssue?: { key: string };
-    inwardIssue?: { key: string };
-  }> = issueData.fields?.issuelinks || [];
-  let linkedKey: string | null = null;
-  for (const link of links) {
-    const typeName = (link.type?.name || "").toLowerCase();
-    const inward = (link.type?.inward || "").toLowerCase();
-    const outward = (link.type?.outward || "").toLowerCase();
-    const isCloneLink =
-      typeName.includes("clone") ||
-      inward.includes("clone") ||
-      outward.includes("clone");
-    if (!isCloneLink) continue;
-    const candidate = link.outwardIssue?.key || link.inwardIssue?.key;
-    if (candidate) { linkedKey = candidate; break; }
-  }
-  if (!linkedKey) {
-    throw new Error(`No "clones"/"is cloned by" link found on ${issueKey}. Ensure a clone link exists in Jira.`);
   }
 
   // Fetch destination issue to get reporter + last commenter for @mention notification
@@ -1574,14 +1589,14 @@ async function internalSyncComment(
     }
   }
 
-  // Build body content: strip #update hashtag, remap media node IDs so images are embedded inline
+  // Build body content: strip #copycomment hashtag, remap media node IDs so images are embedded inline
   let bodyContent: unknown[];
   if (rawADFBody && typeof rawADFBody === "object" && (rawADFBody as Record<string, unknown>).type === "doc") {
     const cleaned = removeHashtagFromADF(rawADFBody) as Record<string, unknown>;
     const remapped = remapMediaIds(cleaned, mediaIdMap, destIssueNumericId) as Record<string, unknown>;
     bodyContent = filterEmptyBlocks((remapped.content as unknown[]) || []);
   } else {
-    const cleaned = commentBody.replace(/#update\b/gi, "").trim();
+    const cleaned = commentBody.replace(/#copycomment\b/gi, "").trim();
     bodyContent = [{ type: "paragraph", content: [{ type: "text", text: cleaned }] }];
   }
 
@@ -1680,6 +1695,7 @@ async function internalSyncComment(
     originalComment: commentBody,
     transformedComment: commentBody,
     author,
+    syncedBy,
     timestamp: new Date().toISOString(),
     status: postRes.ok ? "success" : "failed",
     error: postRes.ok ? undefined : JSON.stringify(postData),
@@ -1691,6 +1707,130 @@ async function internalSyncComment(
 }
 
 /**
+ * Core sync logic — shared between single and bulk sync endpoints.
+ */
+async function internalSyncComment(
+  issueKey: string,
+  commentBody: string,
+  commentId: string,
+  author: string,
+  syncedBy?: string
+): Promise<InternalSyncOutcome> {
+  const syncConfig = getSyncJiraConfig();
+
+  const sourceIssueRes = await makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${issueKey}?fields=issuelinks`);
+  if (!sourceIssueRes.ok) {
+    throw new Error(`Failed to fetch issue links for ${issueKey} (${sourceIssueRes.status})`);
+  }
+  const sourceIssueData = await sourceIssueRes.json();
+  const sourceLinks: Array<{
+    type?: { name?: string; inward?: string; outward?: string };
+    outwardIssue?: { key: string };
+    inwardIssue?: { key: string };
+  }> = sourceIssueData.fields?.issuelinks || [];
+
+  const firstLevelTargets = extractCloneNeighborKeys(sourceLinks, issueKey);
+  if (firstLevelTargets.length === 0) {
+    throw new Error(`No "clones"/"is cloned by" link found on ${issueKey}. Ensure a clone link exists in Jira.`);
+  }
+
+  const MAX_TARGETS = 12;
+  const mandatoryTargets = firstLevelTargets.slice(0, MAX_TARGETS);
+  const targets: string[] = [...mandatoryTargets];
+  const visited = new Set<string>([issueKey, ...mandatoryTargets]);
+  const queue: string[] = [...mandatoryTargets];
+
+  while (queue.length > 0 && targets.length < MAX_TARGETS) {
+    const current = queue.shift() as string;
+    try {
+      const currentRes = await makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${current}?fields=issuelinks`);
+      if (!currentRes.ok) continue;
+      const currentData = await currentRes.json();
+      const currentLinks: Array<{
+        type?: { name?: string; inward?: string; outward?: string };
+        outwardIssue?: { key: string };
+        inwardIssue?: { key: string };
+      }> = currentData.fields?.issuelinks || [];
+      const nextTargets = extractCloneNeighborKeys(currentLinks, current).filter((key) => !visited.has(key));
+
+      for (const nextKey of nextTargets) {
+        visited.add(nextKey);
+        targets.push(nextKey);
+        queue.push(nextKey);
+        if (targets.length >= MAX_TARGETS) break;
+      }
+    } catch {
+      // best-effort traversal; per-target sync still continues
+    }
+  }
+
+  if (targets.length > 1) {
+    writeSyncLog(`[SYNC] Layered clone targets for ${issueKey}: ${targets.join(" -> ")}`);
+  }
+
+  const mandatoryTargetSet = new Set(mandatoryTargets);
+  const propagatedTargets: string[] = [];
+  const mandatoryFailures: SyncTargetFailure[] = [];
+  const secondaryFailures: SyncTargetFailure[] = [];
+  let primaryRecord: SyncRecord | null = null;
+
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index];
+    try {
+      const record = await syncCommentToTarget(syncConfig, issueKey, target, commentBody, commentId, author, syncedBy);
+      if (!primaryRecord && index === 0) {
+        primaryRecord = record;
+      }
+
+      if (record.status === "success") {
+        propagatedTargets.push(target);
+      } else {
+        const failure = { targetKey: target, error: record.error || `POST failed for ${target}` };
+        if (mandatoryTargetSet.has(target)) {
+          mandatoryFailures.push(failure);
+        } else {
+          secondaryFailures.push(failure);
+        }
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      writeSyncLog(`[SYNC] Nested sync failed ${issueKey} -> ${target}: ${errMsg}`);
+      const failure = { targetKey: target, error: errMsg };
+      if (mandatoryTargetSet.has(target)) {
+        mandatoryFailures.push(failure);
+      } else {
+        secondaryFailures.push(failure);
+      }
+    }
+  }
+
+  if (mandatoryFailures.length > 0) {
+    const err = new Error(
+      `First-layer sync failed for ${issueKey}: ${mandatoryFailures.map((f) => `${f.targetKey} (${f.error})`).join("; ")}`
+    ) as Error & {
+      mandatoryFailures?: SyncTargetFailure[];
+      secondaryFailures?: SyncTargetFailure[];
+      propagatedTargets?: string[];
+    };
+    err.mandatoryFailures = mandatoryFailures;
+    err.secondaryFailures = secondaryFailures;
+    err.propagatedTargets = propagatedTargets;
+    throw err;
+  }
+
+  if (!primaryRecord) {
+    throw new Error(`Failed to sync comment from ${issueKey}`);
+  }
+
+  return {
+    primaryRecord,
+    propagatedTargets,
+    mandatoryFailures,
+    secondaryFailures,
+  };
+}
+
+/**
  * POST /api/jira/sync-comment
  * Sync a single comment to its linked ticket.
  */
@@ -1699,14 +1839,14 @@ app.post(
   requireJiraConfig,
   async (req: Request, res: Response) => {
     try {
-      const { issueKey, commentBody, commentId = "", author = "Unknown", authorizedToPost = true } = req.body;
+      const { issueKey, commentBody, commentId = "", author = "Unknown", syncedBy, authorizedToPost = true } = req.body;
 
       if (!issueKey || !commentBody) {
         return res.status(400).json({ error: "issueKey and commentBody are required" });
       }
 
-      if (!/#update\b/i.test(commentBody)) {
-        return res.status(400).json({ error: "No #update hashtag found in comment" });
+      if (!/#copycomment\b/i.test(commentBody)) {
+        return res.status(400).json({ error: "No #copycomment hashtag found in comment" });
       }
 
       // Dedup by commentId
@@ -1722,11 +1862,29 @@ app.post(
         });
       }
 
-      const record = await internalSyncComment(issueKey, commentBody, commentId, author);
-      res.json({ success: record.status === "success", targetKey: record.targetKey, transformedComment: record.transformedComment, record });
+      const outcome = await internalSyncComment(issueKey, commentBody, commentId, author, syncedBy);
+      res.json({
+        success: outcome.primaryRecord.status === "success" && outcome.mandatoryFailures.length === 0,
+        targetKey: outcome.primaryRecord.targetKey,
+        transformedComment: outcome.primaryRecord.transformedComment,
+        record: outcome.primaryRecord,
+        propagatedTargets: outcome.propagatedTargets,
+        mandatoryFailures: outcome.mandatoryFailures,
+        secondaryFailures: outcome.secondaryFailures,
+      });
     } catch (error) {
       console.error("[SYNC COMMENT ERROR]", error);
-      res.status(500).json({ error: error instanceof Error ? error.message : "Comment sync failed" });
+      const syncError = error as Error & {
+        mandatoryFailures?: SyncTargetFailure[];
+        secondaryFailures?: SyncTargetFailure[];
+        propagatedTargets?: string[];
+      };
+      res.status(500).json({
+        error: error instanceof Error ? error.message : "Comment sync failed",
+        mandatoryFailures: syncError.mandatoryFailures || [],
+        secondaryFailures: syncError.secondaryFailures || [],
+        propagatedTargets: syncError.propagatedTargets || [],
+      });
     }
   }
 );
@@ -1753,10 +1911,13 @@ app.post(
         targetKey?: string;
         error?: string;
         record?: SyncRecord;
+        propagatedTargets?: string[];
+        mandatoryFailures?: SyncTargetFailure[];
+        secondaryFailures?: SyncTargetFailure[];
       }> = [];
 
       for (const c of comments) {
-        const { issueKey, commentBody, commentId = "", author = "Unknown" } = c;
+        const { issueKey, commentBody, commentId = "", author = "Unknown", syncedBy } = c;
 
         if (commentId && isAlreadySynced(issueKey, commentId)) {
           results.push({ issueKey, commentId, status: "skipped", error: "Already synced" });
@@ -1764,14 +1925,31 @@ app.post(
         }
 
         try {
-          const record = await internalSyncComment(issueKey, commentBody, commentId, author);
-          results.push({ issueKey, commentId, status: record.status, targetKey: record.targetKey, record });
+          const outcome = await internalSyncComment(issueKey, commentBody, commentId, author, syncedBy);
+          results.push({
+            issueKey,
+            commentId,
+            status: outcome.primaryRecord.status,
+            targetKey: outcome.primaryRecord.targetKey,
+            record: outcome.primaryRecord,
+            propagatedTargets: outcome.propagatedTargets,
+            mandatoryFailures: outcome.mandatoryFailures,
+            secondaryFailures: outcome.secondaryFailures,
+          });
         } catch (error) {
+          const syncError = error as Error & {
+            mandatoryFailures?: SyncTargetFailure[];
+            secondaryFailures?: SyncTargetFailure[];
+            propagatedTargets?: string[];
+          };
           results.push({
             issueKey,
             commentId,
             status: "failed",
             error: error instanceof Error ? error.message : "Sync failed",
+            propagatedTargets: syncError.propagatedTargets || [],
+            mandatoryFailures: syncError.mandatoryFailures || [],
+            secondaryFailures: syncError.secondaryFailures || [],
           });
         }
       }
@@ -1887,6 +2065,7 @@ app.post(
 
       const results: Array<{
         issueKey: string;
+        targetKeys: string[];
         commentId: string;
         commentBody: string;
         commentBodyHtml: string;
@@ -1908,9 +2087,15 @@ app.post(
       await runConcurrent(
         uniqueKeys,
         async (key) => {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment`);
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment,issuelinks`);
           if (!commentsRes.ok) return;
           const data = await commentsRes.json();
+          const issueLinks: Array<{
+            type?: { name?: string; inward?: string; outward?: string };
+            outwardIssue?: { key: string };
+            inwardIssue?: { key: string };
+          }> = data.fields?.issuelinks || [];
+          const targetKeys = extractCloneNeighborKeys(issueLinks, key);
 
           // Determine board for this issue via sprint field
           const sprintFieldKey = Object.keys(data.fields || {}).find((k) =>
@@ -1934,8 +2119,8 @@ app.post(
 
           for (const c of comments) {
             const text = extractADFText(c.body);
-            const isUpdate = /#update\b/i.test(text);
-            if (!isUpdate) continue;
+            const isCopyComment = /#copycomment\b/i.test(text);
+            if (!isCopyComment) continue;
             if (isAlreadySynced(key, c.id)) continue;
 
             const isAuthor = c.author?.accountId === currentUserAccountId;
@@ -1972,6 +2157,7 @@ app.post(
 
             results.push({
               issueKey: key,
+              targetKeys,
               commentId: c.id,
               commentBody: text,
               commentBodyHtml: extractADFHtml(c.body),
@@ -2031,6 +2217,7 @@ app.post(
 
       const results: Array<{
         issueKey: string;
+        targetKeys: string[];
         commentId: string;
         commentBody: string;
         commentBodyHtml: string;
@@ -2050,9 +2237,15 @@ app.post(
 
       for (const key of issueKeys) {
         try {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment`);
+          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment,issuelinks`);
           if (!commentsRes.ok) continue;
           const data = await commentsRes.json();
+          const issueLinks: Array<{
+            type?: { name?: string; inward?: string; outward?: string };
+            outwardIssue?: { key: string };
+            inwardIssue?: { key: string };
+          }> = data.fields?.issuelinks || [];
+          const targetKeys = extractCloneNeighborKeys(issueLinks, key);
 
           const sprintFieldKey = Object.keys(data.fields || {}).find((k) =>
             Array.isArray(data.fields[k]) && data.fields[k][0]?.boardId
@@ -2075,9 +2268,9 @@ app.post(
 
           for (const c of comments) {
             const text = extractADFText(c.body);
-            const isUpdate = /#update\b/i.test(text);
-            console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | isUpdate=${isUpdate}`);
-            if (!isUpdate) continue;
+            const isCopyComment = /#copycomment\b/i.test(text);
+            console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | isCopyComment=${isCopyComment}`);
+            if (!isCopyComment) continue;
             if (isAlreadySynced(key, c.id)) {
               console.log(`[POLL] Skipping ${key}::${c.id} — already synced`);
               continue;
@@ -2117,6 +2310,7 @@ app.post(
 
             results.push({
               issueKey: key,
+              targetKeys,
               commentId: c.id,
               commentBody: text,
               commentBodyHtml: extractADFHtml(c.body),

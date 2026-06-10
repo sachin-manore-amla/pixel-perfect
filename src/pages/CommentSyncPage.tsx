@@ -21,15 +21,11 @@ import {
 import { useCommentSync, type PendingComment, type SyncRecord } from "@/hooks/useCommentSync";
 import { useSelectedProjects } from "@/hooks/useSelectedProjects";
 import { useJiraConfig } from "@/hooks/use-jira-config";
-
-const DIRECTION_LABEL: Record<string, string> = {
-  "to-zlmc": "Z10 → ZLMC",
-  "to-z10": "ZLMC → Z10",
-};
+import { SelectedProjectsFilterDropdown } from "@/components/SelectedProjectsFilterDropdown";
 
 const DIRECTION_TAG: Record<string, string> = {
-  "to-zlmc": "#update",
-  "to-z10": "#update",
+  "to-zlmc": "#copycomment",
+  "to-z10": "#copycomment",
 };
 
 /** How often to auto-discover (ms) */
@@ -46,6 +42,10 @@ function formatRelative(iso: string): string {
 
 function formatTime(d: Date): string {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function escRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const CommentSyncPage = () => {
@@ -81,6 +81,15 @@ const CommentSyncPage = () => {
   const [mentionFilterEnabled, setMentionFilterEnabled] = useState(false);
 
   const { selectedProjects: selectedProjectKeys } = useSelectedProjects();
+  const [filteredProjectKeys, setFilteredProjectKeys] = useState<string[]>(selectedProjectKeys);
+
+  useEffect(() => {
+    setFilteredProjectKeys((prev) => {
+      const next = prev.filter((k) => selectedProjectKeys.includes(k));
+      return next.length > 0 ? next : selectedProjectKeys;
+    });
+  }, [selectedProjectKeys]);
+
   const { config: jiraConfig } = useJiraConfig();
   const ticketUrl = (key: string) =>
     jiraConfig?.instanceUrl ? `${jiraConfig.instanceUrl}/browse/${key}` : null;
@@ -88,14 +97,14 @@ const CommentSyncPage = () => {
   const runAutoDiscover = useCallback(async () => {
     try {
       // Always use 1-day window — server's persisted lastSyncedAt handles precise dedup.
-      await autoDiscover(1, 200, selectedProjectKeys);
+      await autoDiscover(1, 200, filteredProjectKeys);
       setLastChecked(new Date());
       nextPollRef.current = Date.now() + AUTO_POLL_INTERVAL;
       setCountdown(AUTO_POLL_INTERVAL / 1000);
     } catch {
       // error shown via hook
     }
-  }, [autoDiscover, selectedProjectKeys]);
+  }, [autoDiscover, filteredProjectKeys]);
 
   // Initial load
   useEffect(() => {
@@ -136,7 +145,14 @@ const CommentSyncPage = () => {
     const uid = `${comment.issueKey}-${comment.commentId}`;
     setSyncingId(uid);
     try {
-      await syncComment(comment.issueKey, comment.commentBody, comment.commentId, comment.author, comment.authorizedToPost);
+      await syncComment(
+        comment.issueKey,
+        comment.commentBody,
+        comment.commentId,
+        comment.author,
+        comment.authorizedToPost,
+        currentUserName || undefined
+      );
       setSuccessIds((prev) => new Set(prev).add(uid));
     } catch {
       // error shown via hook state
@@ -148,7 +164,7 @@ const CommentSyncPage = () => {
   const handleSyncAll = async () => {
     setSyncAllSummary(null);
     try {
-      const summary = await syncAll(authorizedVisible);
+      const summary = await syncAll(authorizedVisible, currentUserName || undefined);
       setSyncAllSummary(
         `Done — ${summary.succeeded} posted, ${summary.skipped} skipped (already done), ${summary.failed} failed`
       );
@@ -188,6 +204,10 @@ const CommentSyncPage = () => {
   // Toggle narrows board-admins to only their @mentions.
   const visibleComments = (
     pendingComments.filter((c) => {
+      const projectKey = c.issueKey.split("-")[0] || "";
+      const inSelectedProject = filteredProjectKeys.includes(projectKey);
+      if (!inSelectedProject) return false;
+
       const isMentioned = currentUserName
         ? c.mentions.some((m) => m.toLowerCase() === currentUserName.toLowerCase())
         : false;
@@ -197,6 +217,20 @@ const CommentSyncPage = () => {
   ).slice().sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
 
   const authorizedVisible = visibleComments.filter((c) => c.authorizedToPost);
+
+  const relevantSyncHistory = currentUserName
+    ? syncHistory.filter((record) => {
+        const name = currentUserName.trim();
+        const isAuthor = (record.author || "").trim().toLowerCase() === name.toLowerCase();
+        if (isAuthor) return true;
+        const mentionRegex = new RegExp(`@\\s*${escRegExp(name)}(?:\\b|$)`, "i");
+        return mentionRegex.test(record.originalComment || "") || mentionRegex.test(record.transformedComment || "");
+      })
+    : [];
+
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [currentUserName, syncHistory.length]);
 
   return (
     <DashboardLayout>
@@ -209,8 +243,14 @@ const CommentSyncPage = () => {
               Cross-project comment sync — works across any linked Jira projects
             </p>
           </div>
-          {/* Live monitor badge */}
-          <div className="flex items-center gap-2 rounded border border-border bg-card px-3 py-2 text-xs shrink-0">
+          <div className="flex items-center gap-3">
+            <SelectedProjectsFilterDropdown
+              availableProjectKeys={selectedProjectKeys}
+              selectedProjectKeys={filteredProjectKeys}
+              onSelectionChange={setFilteredProjectKeys}
+            />
+            {/* Live monitor badge */}
+            <div className="flex items-center gap-2 rounded border border-border bg-card px-3 py-2 text-xs shrink-0">
             <button
               onClick={() => setLiveEnabled((v) => !v)}
               className={`flex items-center gap-1.5 font-semibold transition-colors ${
@@ -237,6 +277,7 @@ const CommentSyncPage = () => {
             >
               {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
             </button>
+            </div>
           </div>
         </div>
 
@@ -246,7 +287,7 @@ const CommentSyncPage = () => {
             <Sparkles className="h-4 w-4 text-primary" /> How it works
           </p>
           <p>
-            Add <code className="bg-muted px-1 rounded font-mono text-primary">#update</code> to any comment in a Jira ticket → it auto-appears here for review → on sync, the comment is posted verbatim to the <span className="font-medium text-foreground">clone-linked ticket</span> in the other project.
+            Add <code className="bg-muted px-1 rounded font-mono text-primary">#copycomment</code> to any comment in a Jira ticket → it auto-appears here for review → on sync, the comment is posted verbatim to the <span className="font-medium text-foreground">clone-linked ticket</span> in the other project.
           </p>
           <p>
             The destination is determined by the <span className="font-medium text-foreground">&quot;is cloned by&quot; / &quot;clones&quot;</span> link on the source ticket — not by the project name. Works across any projects you have selected.
@@ -267,7 +308,7 @@ const CommentSyncPage = () => {
           </div>
           <div className="rounded bg-card border border-border border-l-4 border-l-warning p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide">Pending Sync</p>
-            <p className="text-2xl font-bold text-foreground mt-1">{pendingComments.length}</p>
+            <p className="text-2xl font-bold text-foreground mt-1">{visibleComments.length}</p>
           </div>
           <div className="rounded bg-card border border-border border-l-4 border-l-destructive p-4">
             <p className="text-xs text-muted-foreground uppercase tracking-wide">Failed</p>
@@ -341,17 +382,7 @@ const CommentSyncPage = () => {
         {/* Empty state after load */}
         {!isLoading && visibleComments.length === 0 && lastChecked && (
           <div className="rounded bg-card border border-border px-4 py-6 text-center text-xs text-muted-foreground">
-            {pendingComments.length > 0 && mentionFilterEnabled
-              ? `Showing only @mentions (${pendingComments.length - visibleComments.length} board comments hidden). `
-              : `✓ No pending comments for your boards. Up to date as of ${formatTime(lastChecked!)}.`}
-            {pendingComments.length > 0 && mentionFilterEnabled && (
-              <button
-                onClick={() => setMentionFilterEnabled(false)}
-                className="underline text-primary hover:opacity-80"
-              >
-                Show all {pendingComments.length}
-              </button>
-            )}
+            ✓ No pending comments for your current list. Up to date as of {formatTime(lastChecked!)}.
           </div>
         )}
 
@@ -370,11 +401,6 @@ const CommentSyncPage = () => {
             >
               {mentionFilterEnabled ? `@mentions only ✓` : "Show @mentions only"}
             </button>
-            {mentionFilterEnabled && pendingComments.length > visibleComments.length && (
-              <span className="text-xs text-muted-foreground">
-                ({pendingComments.length - visibleComments.length} others hidden)
-              </span>
-            )}
           </div>
         )}
 
@@ -407,9 +433,9 @@ const CommentSyncPage = () => {
               <thead>
                 <tr className="border-b border-border">
                   <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Ticket</th>
+                  <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Target</th>
                   <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Author</th>
                   <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Added</th>
-                  <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Movement</th>
                   <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Identifier</th>
                   <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Comment Preview</th>
                   <th className="text-center py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Action</th>
@@ -433,16 +459,29 @@ const CommentSyncPage = () => {
                             <a href={ticketUrl(comment.issueKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{comment.issueKey}</a>
                           ) : comment.issueKey}
                         </td>
+                        <td className="py-3 px-4 text-primary font-mono">
+                          {comment.targetKeys?.length ? (
+                            comment.targetKeys.map((targetKey, index) => (
+                              <span key={`${uid}-target-${targetKey}`}>
+                                {ticketUrl(targetKey) ? (
+                                  <a href={ticketUrl(targetKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                                    {targetKey}
+                                  </a>
+                                ) : (
+                                  targetKey
+                                )}
+                                {index < comment.targetKeys.length - 1 ? ", " : ""}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
                         <td className="py-3 px-4 text-foreground">{comment.author}</td>
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">
                           <span className="flex items-center gap-1">
                             <Clock className="h-3 w-3" />
                             {formatRelative(comment.created)}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          <span className="text-muted-foreground">
-                            {DIRECTION_LABEL[comment.direction] || comment.direction}
                           </span>
                         </td>
                         <td className="py-3 px-4">
@@ -552,12 +591,16 @@ const CommentSyncPage = () => {
               <RefreshCw className="h-3 w-3" /> Refresh
             </button>
           </div>
-          {syncHistory.length === 0 ? (
+          {!currentUserName ? (
             <div className="px-4 py-8 text-center text-xs text-muted-foreground">
-              No sync records yet. Scan tickets and use "Sync Now" to start.
+              Resolving current Jira user for scoped history...
+            </div>
+          ) : relevantSyncHistory.length === 0 ? (
+            <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+              No sync records where you are author or @mentioned.
             </div>
           ) : (() => {
-            const sorted = [...syncHistory].sort(
+            const sorted = [...relevantSyncHistory].sort(
               (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
             );
             const totalPages = Math.ceil(sorted.length / HISTORY_PAGE_SIZE);
@@ -571,9 +614,9 @@ const CommentSyncPage = () => {
                   <thead>
                     <tr className="border-b border-border">
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Source</th>
-                      <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Direction</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Target</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Author</th>
+                      <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Synced By</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">AI Output (preview)</th>
                       <th className="text-left py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Time</th>
                       <th className="text-center py-2 px-4 font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
@@ -590,17 +633,13 @@ const CommentSyncPage = () => {
                             <a href={ticketUrl(record.sourceKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{record.sourceKey}</a>
                           ) : record.sourceKey}
                         </td>
-                        <td className="py-3 px-4">
-                          <span className="text-muted-foreground">
-                            {DIRECTION_LABEL[record.direction] || record.direction}
-                          </span>
-                        </td>
                         <td className="py-3 px-4 font-mono text-primary">
                           {ticketUrl(record.targetKey) ? (
                             <a href={ticketUrl(record.targetKey)!} target="_blank" rel="noopener noreferrer" className="hover:underline">{record.targetKey}</a>
                           ) : record.targetKey}
                         </td>
                         <td className="py-3 px-4 text-muted-foreground">{record.author}</td>
+                        <td className="py-3 px-4 text-muted-foreground">{record.syncedBy || "—"}</td>
                         <td className="py-3 px-4 text-muted-foreground max-w-[280px] truncate">{record.transformedComment}</td>
                         <td className="py-3 px-4 text-muted-foreground whitespace-nowrap">{formatRelative(record.timestamp)}</td>
                         <td className="py-3 px-4 text-center">
