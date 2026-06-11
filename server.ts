@@ -782,6 +782,7 @@ function loadSyncState(): SyncState {
       const raw = fs.readFileSync(SYNC_STATE_FILE, "utf-8");
       const parsed = JSON.parse(raw) as SyncState;
       const parsedHistory = (parsed.history || []) as SyncRecord[];
+      const parsedSyncedIds = parsed.syncedIds || [];
       let historyNormalized = false;
       const normalizedHistory = parsedHistory.map((record) => {
         const failedDefault = record.status === "failed" ? LEGACY_FAILED_SYNCED_BY_DEFAULT : LEGACY_SYNCED_BY_DEFAULT;
@@ -801,19 +802,27 @@ function loadSyncState(): SyncState {
         return { ...record, syncedBy: failedDefault };
       });
 
-      if (historyNormalized) {
+      const historySuccessIds = normalizedHistory
+        .filter((record) => record.status === "success" && typeof record.commentId === "string" && record.commentId.trim().length > 0)
+        .map((record) => `${record.sourceKey}::${record.commentId}`);
+      const mergedSyncedIds = Array.from(new Set<string>([...parsedSyncedIds, ...historySuccessIds]));
+      const syncedIdsBackfilled = mergedSyncedIds.length !== parsedSyncedIds.length;
+
+      if (historyNormalized || syncedIdsBackfilled) {
         const normalizedState: SyncState = {
-          syncedIds: parsed.syncedIds || [],
+          syncedIds: mergedSyncedIds,
           history: normalizedHistory,
           lastSyncedAt: parsed.lastSyncedAt || null,
         };
         fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(normalizedState, null, 2), "utf-8");
-        console.log(`[SYNC STATE] Backfilled syncedBy for legacy history records (success/default="${LEGACY_SYNCED_BY_DEFAULT}", failed="${LEGACY_FAILED_SYNCED_BY_DEFAULT}")`);
+        console.log(
+          `[SYNC STATE] Backfilled state (syncedBy + dedupe IDs). success/default="${LEGACY_SYNCED_BY_DEFAULT}", failed="${LEGACY_FAILED_SYNCED_BY_DEFAULT}", syncedIds=${mergedSyncedIds.length}`
+        );
       }
 
-      console.log(`[SYNC STATE] Loaded ${parsed.syncedIds?.length ?? 0} synced IDs, lastSyncedAt=${parsed.lastSyncedAt}`);
+      console.log(`[SYNC STATE] Loaded ${mergedSyncedIds.length} synced IDs, lastSyncedAt=${parsed.lastSyncedAt}`);
       return {
-        syncedIds: parsed.syncedIds || [],
+        syncedIds: mergedSyncedIds,
         history: normalizedHistory,
         lastSyncedAt: parsed.lastSyncedAt || null,
       };
@@ -859,6 +868,10 @@ function registerSyncRecord(record: SyncRecord) {
 /** Check if a specific comment has already been successfully synced */
 function isAlreadySynced(sourceKey: string, commentId: string): boolean {
   return syncedCommentIds.has(`${sourceKey}::${commentId}`);
+}
+
+function isJiraTriageSystemComment(commentText: string): boolean {
+  return /(?:synced by jiratriage|posted by jiratriage)/i.test(commentText);
 }
 
 
@@ -2151,6 +2164,7 @@ app.post(
 
           for (const c of comments) {
             const text = extractADFText(c.body);
+            if (isJiraTriageSystemComment(text)) continue;
             const isCopyComment = /#copycomment\b/i.test(text);
             if (!isCopyComment) continue;
             if (isAlreadySynced(key, c.id)) continue;
@@ -2300,6 +2314,7 @@ app.post(
 
           for (const c of comments) {
             const text = extractADFText(c.body);
+            if (isJiraTriageSystemComment(text)) continue;
             const isCopyComment = /#copycomment\b/i.test(text);
             console.log(`[POLL] ${key} comment ${c.id} — text: "${text.slice(0, 150)}" | isCopyComment=${isCopyComment}`);
             if (!isCopyComment) continue;
