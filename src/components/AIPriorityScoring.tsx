@@ -112,7 +112,7 @@ export function AIPriorityScoring() {
       setError(null);
       try {
         // Fetch P1 tickets from last 7 days
-        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -7d`;
+        const jql = `${projectJQL} AND ("Tags[Short text]" ~ 'Priority 1' OR priority IN (Blocker, Critical)) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -7d`;
         const response = await search<{ issues: JiraIssue[] }>(jql, {
           maxResults: 100,
           fields: ["summary", "status", "priority", "assignee", "created", "updated"],

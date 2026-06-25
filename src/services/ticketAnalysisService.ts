@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const API_BASE = import.meta.env.VITE_API_URL || "";
 
 export interface JiraComment {
   id: string;
@@ -56,7 +56,7 @@ export async function fetchP1TicketsWithComments(daysWindow: number = 30, select
 
     // Step 1: Fetch P1 tickets with pagination
     const jql =
-      `${projectFilter} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
+      `${projectFilter} AND ((project IN (Z10, Z10LMC) AND "Tags[Short text]" ~ 'Priority 1') OR (project NOT IN (Z10, Z10LMC) AND priority IN (Blocker, Critical))) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;
@@ -444,7 +444,7 @@ export async function fetchRecentActivity(daysWindow: number = 1, currentUserDis
 
     // Fetch P1 tickets from selected projects using pagination
     const jql =
-      `${projectFilter} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
+      `${projectFilter} AND ((project IN (Z10, Z10LMC) AND "Tags[Short text]" ~ 'Priority 1') OR (project NOT IN (Z10, Z10LMC) AND priority IN (Blocker, Critical))) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;
@@ -629,7 +629,7 @@ export async function fetchUnattendedTickets(thresholdHours: number = 24, select
       : `project IN (${selectedProjects.join(", ")})`;
 
     const jql =
-      `${projectFilter} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) ORDER BY updated DESC`;
+      `${projectFilter} AND ((project IN (Z10, Z10LMC) AND "Tags[Short text]" ~ 'Priority 1') OR (project NOT IN (Z10, Z10LMC) AND priority IN (Blocker, Critical))) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", "RFT-HotFix", Rejected) ORDER BY updated DESC`;
 
     const PAGE_SIZE = 100;
     let startAt = 0;

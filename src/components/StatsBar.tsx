@@ -41,7 +41,7 @@ export function StatsBar() {
 
       try {
         setIsLoading(true);
-        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
+        const jql = `${projectJQL} AND ("Tags[Short text]" ~ 'Priority 1' OR priority IN (Blocker, Critical)) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected)`;
         const response = await search<SearchResponse>(jql, {
           maxResults: 100, // Fetch actual issues for reference
         });       
