@@ -29,7 +29,7 @@ export function JiraConfigDialog() {
   const { selectedProjects } = useSelectedProjects();
 
   const [formData, setFormData] = useState({
-    instanceUrl: "",
+    instanceUrl: "https://amla.atlassian.net",
     email: "",
     apiToken: "",
   });

@@ -63,7 +63,7 @@ export function AICommentTransform() {
       setLoading(true);
       setError(null);
       try {
-        const jql = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
+        const jql = `${projectJQL} AND ("Tags[Short text]" ~ 'Priority 1' OR priority IN (Blocker, Critical)) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
         const response = await search<{ issues: JiraIssue[] }>(jql, {
           maxResults: 100,
           fields: ["summary", "status", "priority"],

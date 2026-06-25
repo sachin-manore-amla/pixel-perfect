@@ -52,7 +52,7 @@ function getTimeBucket(createdDate: string): "24h" | "15d" | "30d" | "older" {
 function getPriorityColor(priority?: string) {
   if (!priority) return "bg-gray-100 text-gray-800 border-gray-300";
   const lower = priority.toLowerCase();
-  if (lower.includes("highest") || lower.includes("p0")) return "bg-red-100 text-red-800 border-red-300";
+  if (lower.includes("highest") || lower.includes("p0") || lower.includes("blocker") || lower.includes("critical")) return "bg-red-100 text-red-800 border-red-300";
   if (lower.includes("high") || lower.includes("p1")) return "bg-orange-100 text-orange-800 border-orange-300";
   if (lower.includes("medium") || lower.includes("p2")) return "bg-yellow-100 text-yellow-800 border-yellow-300";
   if (lower.includes("low") || lower.includes("p3")) return "bg-blue-100 text-blue-800 border-blue-300";
@@ -248,7 +248,7 @@ export function P1BucketSection() {
         };
 
         // Fetch Last 24 Hours
-        const jql24h = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
+        const jql24h = `${projectJQL} AND ("Tags[Short text]" ~ 'Priority 1' OR priority IN (Blocker, Critical)) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -1d`;
         const response24h = await search<{ issues: JiraIssue[]; total: number }>(
           jql24h,
           {
@@ -259,7 +259,7 @@ export function P1BucketSection() {
         results["24h"] = response24h.issues || [];
 
         // Fetch Last 15 Days
-        const jql15d = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
+        const jql15d = `${projectJQL} AND ("Tags[Short text]" ~ 'Priority 1' OR priority IN (Blocker, Critical)) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -15d`;
         const response15d = await search<{ issues: JiraIssue[]; total: number }>(
           jql15d,
           {
@@ -270,7 +270,7 @@ export function P1BucketSection() {
         results["15d"] = response15d.issues || [];
 
         // Fetch Last 30 Days
-        const jql30d = `${projectJQL} AND "Tags[Short text]" ~ 'Priority 1' AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -30d`;
+        const jql30d = `${projectJQL} AND ("Tags[Short text]" ~ 'Priority 1' OR priority IN (Blocker, Critical)) AND status NOT IN (Done, "QA Done", "QA Done-HotFix", RFT, "RFT ON HOT FIX", "RFT on Stage", RFT-HotFix, Rejected) AND updated >= -30d`;
         const response30d = await search<{ issues: JiraIssue[]; total: number }>(
           jql30d,
           {

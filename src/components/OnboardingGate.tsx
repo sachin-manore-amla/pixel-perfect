@@ -83,7 +83,7 @@ function ConnectStep({ onSuccess }: { onSuccess: () => void }) {
   const [saveLoading, setSaveLoading] = useState(false);
   const [testPassed, setTestPassed] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
-  const [form, setForm] = useState({ instanceUrl: "", email: "", apiToken: "" });
+  const [form, setForm] = useState({ instanceUrl: "https://amla.atlassian.net", email: "", apiToken: "" });
 
   const allFilled = form.instanceUrl && form.email && form.apiToken;
 
