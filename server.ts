@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import helmet from "helmet";
 import path from "path";
 import fs from "fs";
 
@@ -12,8 +13,94 @@ dotenv.config();
 const app = express();
 const PORT = process.env.VITE_API_PORT || 3001;
 
+app.disable("x-powered-by");
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'self'"],
+      },
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+    noSniff: true,
+  })
+);
+
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), fullscreen=(), payment=()"
+  );
+  next();
+});
+
+const isProd = process.env.NODE_ENV === "production";
+const envAllowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const defaultDevOrigins = [
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+];
+
+const allowedOrigins = new Set<string>(
+  envAllowedOrigins.length > 0
+    ? envAllowedOrigins
+    : isProd
+      ? []
+      : defaultDevOrigins
+);
+
+if (isProd && allowedOrigins.size === 0) {
+  console.warn("[SECURITY] CORS_ALLOWED_ORIGINS is empty in production. Cross-origin browser requests will be blocked.");
+}
+
+const corsOptions: cors.CorsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (allowedOrigins.has(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error("CORS policy blocked this origin"));
+  },
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "X-Jira-Url",
+    "X-Jira-Email",
+    "X-Jira-Token",
+  ],
+  credentials: false,
+  optionsSuccessStatus: 204,
+};
+
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
+  if (error instanceof Error && error.message === "CORS policy blocked this origin") {
+    return res.status(403).json({ error: "CORS forbidden for this origin" });
+  }
+  next(error);
+});
 app.use(express.json());
 
 // Store Jira config (in production, this would come from secure storage)
@@ -23,10 +110,8 @@ interface JiraConfig {
   apiToken: string;
 }
 
-let jiraConfig: JiraConfig | null = null;
+// Global jiraConfig removed for security - each request must provide credentials
 
-// Path to persist config across server restarts
-const CONFIG_FILE = path.join(process.cwd(), ".jira-config.json");
 const SYNC_LOG_FILE = path.join(process.cwd(), "sync-debug.log");
 
 function writeSyncLog(message: string) {
@@ -39,84 +124,55 @@ function writeSyncLog(message: string) {
   }
 }
 
-function loadPersistedConfig(): JiraConfig | null {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      const raw = fs.readFileSync(CONFIG_FILE, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed.instanceUrl && parsed.email && parsed.apiToken) {
-        console.log("[INIT] Loaded Jira config from persisted file");
-        return parsed as JiraConfig;
-      }
-    }
-  } catch (e) {
-    console.warn("[INIT] Could not read persisted Jira config:", e);
-  }
-  return null;
-}
+// Persisted config functions removed - credentials should not be stored unencrypted on server
 
-function savePersistedConfig(config: JiraConfig | null) {
-  try {
-    if (config) {
-      fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
-    } else {
-      if (fs.existsSync(CONFIG_FILE)) fs.unlinkSync(CONFIG_FILE);
-    }
-  } catch (e) {
-    console.warn("[INIT] Could not persist Jira config:", e);
-  }
-}
+// Middleware to authenticate requests using Jira credentials in headers
+const authenticate = (req: Request, res: Response, next: NextFunction) => {
+  const headerUrl = req.headers["x-jira-url"] as string;
+  const headerEmail = req.headers["x-jira-email"] as string;
+  const headerToken = req.headers["x-jira-token"] as string;
 
-// Initialize JIRA config from persisted file or environment variables at startup
-const initJiraConfig = () => {
-  // 1. Try persisted config file first (saved from UI)
-  const persisted = loadPersistedConfig();
-  if (persisted) {
-    jiraConfig = persisted;
-    return;
-  }
+  const body = (req.body || {}) as Partial<JiraConfig>;
+  const allowBodyCredentials =
+    req.path === "/jira/config" || req.path === "/jira/test";
 
-  // 2. Fall back to environment variables
-  const instanceUrl = process.env.VITE_JIRA_API_URL;
-  const email = process.env.VITE_JIRA_USERNAME;
-  const apiToken = process.env.VITE_JIRA_PASSWORD;
+  const instanceUrl = headerUrl || (allowBodyCredentials ? body.instanceUrl : undefined);
+  const email = headerEmail || (allowBodyCredentials ? body.email : undefined);
+  const apiToken = headerToken || (allowBodyCredentials ? body.apiToken : undefined);
 
-  if (instanceUrl && email && apiToken) {
-    jiraConfig = {
-      instanceUrl: instanceUrl.replace(/\/$/, ""),
-      email,
-      apiToken,
-    };
-    console.log("[INIT] JIRA config initialized from environment variables");
-  } else {
-    console.warn("[INIT] JIRA credentials not found in environment variables or config file");
-  }
-};
-
-// Initialize on startup
-initJiraConfig();
-
-// Middleware to validate Jira config
-const requireJiraConfig = (req: Request, res: Response, next: NextFunction) => {
-  if (!jiraConfig) {
-    return res.status(400).json({
-      error: "Jira configuration not found. Please configure Jira first.",
+  if (!instanceUrl || !email || !apiToken) {
+    return res.status(401).json({
+      error: "Authentication required. Provide X-Jira-Url, X-Jira-Email, and X-Jira-Token headers.",
     });
   }
+
+  try {
+    new URL(instanceUrl);
+  } catch {
+    return res.status(401).json({ error: "Invalid Jira instance URL in headers" });
+  }
+
+  (req as any).jiraConfig = {
+    instanceUrl: instanceUrl.replace(/\/$/, ""),
+    email,
+    apiToken,
+  };
   next();
 };
 
-// Helper to make Jira API requests
+// Apply authentication to all /api routes
+app.use("/api", authenticate);
+app.use("/api", applyApiRateLimit);
+
 async function makeJiraRequest(
+  req: Request,
   method: string,
   endpoint: string,
   body?: unknown
 ): Promise<globalThis.Response> {
-  if (!jiraConfig) {
-    throw new Error("Jira configuration not found");
-  }
-
-  return makeJiraRequestWithConfig(jiraConfig, method, endpoint, body);
+  const config = (req as any).jiraConfig;
+  if (!config) throw new Error("Jira config not found in request");
+  return makeJiraRequestWithConfig(config, method, endpoint, body);
 }
 
 function makeJiraRequestWithConfig(
@@ -143,17 +199,188 @@ function makeJiraRequestWithConfig(
   return fetch(url, options);
 }
 
+const SEARCH_RATE_LIMIT_WINDOW_MS = 60_000;
+const AUTHORIZED_PROJECT_CACHE_TTL_MS = 5 * 60_000;
+
+const API_RATE_LIMIT_WINDOW_MS = 60_000;
+const apiRateLimitByIp = new Map<string, { count: number; windowStart: number }>();
+const apiRateLimitByUser = new Map<string, { count: number; windowStart: number }>();
+const authorizedProjectCache = new Map<string, { expiresAt: number; projectKeys: Set<string> }>();
+
+interface RatePolicy {
+  ipMax: number;
+  userMax: number;
+}
+
+function getRatePolicy(path: string): RatePolicy {
+  if (path === "/jira/search") {
+    return { ipMax: 20, userMax: 15 };
+  }
+  if (path === "/jira/projects") {
+    return { ipMax: 30, userMax: 20 };
+  }
+  return { ipMax: 120, userMax: 80 };
+}
+
+function extractProjectKeysFromJql(jql: string): string[] {
+  const normalizedKeys = new Set<string>();
+
+  const projectEqualsRegex = /\bproject\s*=\s*(?:"([A-Za-z0-9_-]+)"|'([A-Za-z0-9_-]+)'|([A-Za-z0-9_-]+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = projectEqualsRegex.exec(jql)) !== null) {
+    const key = (match[1] || match[2] || match[3] || "").trim();
+    if (key) normalizedKeys.add(key.toUpperCase());
+  }
+
+  const projectInRegex = /\bproject\s+in\s*\(([^)]+)\)/gi;
+  while ((match = projectInRegex.exec(jql)) !== null) {
+    const rawList = (match[1] || "").split(",");
+    for (const token of rawList) {
+      const key = token.trim().replace(/^['"]|['"]$/g, "");
+      if (key) normalizedKeys.add(key.toUpperCase());
+    }
+  }
+
+  return Array.from(normalizedKeys);
+}
+
+function getRateLimitIdentity(req: Request): { ipKey: string; userKey: string } {
+  const config = (req as any).jiraConfig as JiraConfig | undefined;
+  const body = (req.body || {}) as Partial<JiraConfig>;
+  const email = (config?.email || body.email || "anonymous").toLowerCase();
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  return {
+    ipKey: `ip:${ip}`,
+    userKey: `user:${email}`,
+  };
+}
+
+function updateCounter(
+  store: Map<string, { count: number; windowStart: number }>,
+  key: string,
+  maxAllowed: number
+): { limited: boolean; retryAfterSeconds: number; remaining: number } {
+  const now = Date.now();
+  const entry = store.get(key);
+
+  if (!entry || now - entry.windowStart >= API_RATE_LIMIT_WINDOW_MS) {
+    store.set(key, { count: 1, windowStart: now });
+    return { limited: false, retryAfterSeconds: 0, remaining: Math.max(0, maxAllowed - 1) };
+  }
+
+  if (entry.count >= maxAllowed) {
+    const retryAfterMs = API_RATE_LIMIT_WINDOW_MS - (now - entry.windowStart);
+    return {
+      limited: true,
+      retryAfterSeconds: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+      remaining: 0,
+    };
+  }
+
+  entry.count += 1;
+  store.set(key, entry);
+  return {
+    limited: false,
+    retryAfterSeconds: 0,
+    remaining: Math.max(0, maxAllowed - entry.count),
+  };
+}
+
+function applyApiRateLimit(req: Request, res: Response, next: NextFunction) {
+  const { ipKey, userKey } = getRateLimitIdentity(req);
+  const policy = getRatePolicy(req.path);
+
+  const ipResult = updateCounter(apiRateLimitByIp, ipKey, policy.ipMax);
+  const userResult = updateCounter(apiRateLimitByUser, userKey, policy.userMax);
+
+  const effectiveLimit = Math.min(policy.ipMax, policy.userMax);
+  const effectiveRemaining = Math.min(ipResult.remaining, userResult.remaining);
+  const retryAfterSeconds = Math.max(ipResult.retryAfterSeconds, userResult.retryAfterSeconds);
+
+  res.setHeader("X-RateLimit-Limit", String(effectiveLimit));
+  res.setHeader("X-RateLimit-Remaining", String(effectiveRemaining));
+  res.setHeader("X-RateLimit-Reset", String(Math.ceil(Date.now() / 1000) + retryAfterSeconds));
+
+  if (ipResult.limited || userResult.limited) {
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    console.warn(`[RATE LIMIT] Blocked ${req.method} ${req.path} for ${ipKey} / ${userKey}`);
+    return res.status(429).json({
+      error: "Rate limit exceeded",
+      retryAfterSeconds,
+    });
+  }
+
+  return next();
+}
+
+async function getAuthorizedProjectKeys(req: Request): Promise<Set<string>> {
+  const config = (req as any).jiraConfig as JiraConfig;
+  const cacheKey = `${config.instanceUrl}|${config.email.toLowerCase()}`;
+  const now = Date.now();
+  const cached = authorizedProjectCache.get(cacheKey);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.projectKeys;
+  }
+
+  const projectKeys = new Set<string>();
+  let startAt = 0;
+  const maxResults = 50;
+  let keepGoing = true;
+
+  while (keepGoing) {
+    const response = await makeJiraRequest(
+      req,
+      "GET",
+      `/project/search?startAt=${startAt}&maxResults=${maxResults}&orderBy=key`
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to resolve authorized projects: ${response.status}`);
+    }
+
+    const data = await response.json() as { values?: Array<{ key: string }>; isLast?: boolean };
+    const values = data.values || [];
+
+    for (const project of values) {
+      if (project.key) {
+        projectKeys.add(project.key.toUpperCase());
+      }
+    }
+
+    if (data.isLast === true || values.length < maxResults) {
+      keepGoing = false;
+    } else {
+      startAt += values.length;
+    }
+  }
+
+  authorizedProjectCache.set(cacheKey, {
+    expiresAt: now + AUTHORIZED_PROJECT_CACHE_TTL_MS,
+    projectKeys,
+  });
+
+  return projectKeys;
+}
+
+function isJiraJqlErrorPayload(payload: unknown): payload is { errorMessages?: unknown[]; errors?: Record<string, unknown> } {
+  if (!payload || typeof payload !== "object") return false;
+  const obj = payload as { errorMessages?: unknown; errors?: unknown };
+  const hasErrorMessages = Array.isArray(obj.errorMessages) && obj.errorMessages.length > 0;
+  const hasErrorsObject = !!obj.errors && typeof obj.errors === "object" && Object.keys(obj.errors as Record<string, unknown>).length > 0;
+  return hasErrorMessages || hasErrorsObject;
+}
+
 /**
  * Resolve credentials used for sync execution.
- * Prefer bot credentials from env for consistent behavior across users.
+ * Sync identity should be provided in headers or via dedicated environment variables.
  */
-function getSyncJiraConfig(): JiraConfig {
+function getSyncJiraConfig(req?: Request): JiraConfig {
   const instanceUrl = process.env.JIRA_SYNC_INSTANCE_URL;
   const email = process.env.JIRA_SYNC_EMAIL;
   const apiToken = process.env.JIRA_SYNC_API_TOKEN;
 
-  // Use dedicated sync/bot identity only when explicitly configured.
-  // Otherwise fall back to currently configured Jira identity (jiraConfig).
+  // Use dedicated sync/bot identity only when explicitly configured in environment.
   if (instanceUrl && email && apiToken) {
     return {
       instanceUrl: instanceUrl.replace(/\/$/, ""),
@@ -162,57 +389,22 @@ function getSyncJiraConfig(): JiraConfig {
     };
   }
 
-  if (jiraConfig) return jiraConfig;
-  throw new Error("Jira configuration not found");
+  // Otherwise fall back to the authenticated user's credentials
+  const config = req ? (req as any).jiraConfig : null;
+  if (config) return config;
+  throw new Error("Jira configuration not found in request");
 }
 
 /** Make a request to the Jira Agile API (/rest/agile/1.0) */
-async function makeAgileRequest(method: string, endpoint: string): Promise<globalThis.Response> {
-  if (!jiraConfig) throw new Error("Jira configuration not found");
-  const url = `${jiraConfig.instanceUrl}/rest/agile/1.0${endpoint}`;
-  const authHeader = `Basic ${Buffer.from(`${jiraConfig.email}:${jiraConfig.apiToken}`).toString("base64")}`;
+async function makeAgileRequest(config: JiraConfig, method: string, endpoint: string): Promise<globalThis.Response> {
+  const url = `${config.instanceUrl}/rest/agile/1.0${endpoint}`;
+  const authHeader = `Basic ${Buffer.from(`${config.email}:${config.apiToken}`).toString("base64")}`;
   return fetch(url, { method, headers: { Authorization: authHeader, "Content-Type": "application/json" } });
 }
 
 /**
- * POST /api/jira/config
- * Save Jira configuration
- */
-app.post("/api/jira/config", (req: Request, res: Response) => {
-  try {
-    const { instanceUrl, email, apiToken } = req.body;
-
-    if (!instanceUrl || !email || !apiToken) {
-      return res.status(400).json({
-        error: "Missing required fields: instanceUrl, email, apiToken",
-      });
-    }
-
-    // Validate URL
-    try {
-      new URL(instanceUrl);
-    } catch {
-      return res.status(400).json({ error: "Invalid Jira instance URL" });
-    }
-
-    jiraConfig = {
-      instanceUrl: instanceUrl.replace(/\/$/, ""),
-      email,
-      apiToken,
-    };
-
-    savePersistedConfig(jiraConfig);
-    res.json({ success: true, message: "Jira config saved" });
-  } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to save config",
-    });
-  }
-});
-
-/**
  * POST /api/jira/test
- * Test Jira connection
+ * Test Jira connection using provided credentials
  */
 app.post("/api/jira/test", async (req: Request, res: Response) => {
   try {
@@ -228,25 +420,24 @@ app.post("/api/jira/test", async (req: Request, res: Response) => {
       apiToken,
     };
 
-    // Temporarily set config for this test
-    const originalConfig = jiraConfig;
-    jiraConfig = tempConfig;
+    const url = `${tempConfig.instanceUrl}/rest/api/3/myself`;
+    const authHeader = `Basic ${Buffer.from(`${tempConfig.email}:${tempConfig.apiToken}`).toString("base64")}`;
 
-    try {
-      const response = await makeJiraRequest("GET", "/myself");
-      const fetchResponse = response as globalThis.Response;
+    const fetchResponse = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+      },
+    });
 
-      if (fetchResponse.ok) {
-        res.json({ success: true, message: "Connection successful" });
-      } else {
-        res.status(fetchResponse.status).json({
-          success: false,
-          error: `Jira API returned ${fetchResponse.status}`,
-        });
-      }
-    } finally {
-      // Restore original config
-      jiraConfig = originalConfig;
+    if (fetchResponse.ok) {
+      res.json({ success: true, message: "Connection successful" });
+    } else {
+      res.status(fetchResponse.status).json({
+        success: false,
+        error: `Jira API returned ${fetchResponse.status}`,
+      });
     }
   } catch (error) {
     res.status(500).json({
@@ -256,37 +447,45 @@ app.post("/api/jira/test", async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /api/jira/config
+ * Validate and acknowledge client-side Jira configuration.
+ */
+app.post("/api/jira/config", (req: Request, res: Response) => {
+  const { instanceUrl, email, apiToken } = req.body || {};
+  if (!instanceUrl || !email || !apiToken) {
+    return res.status(400).json({ error: "Missing required fields: instanceUrl, email, apiToken" });
+  }
+  return res.json({ success: true, message: "Jira credentials accepted for this session" });
+});
+
+/**
  * DELETE /api/jira/config
- * Clear Jira configuration
+ * Clear Jira configuration (now just a no-op as server doesn't store it)
  */
 app.delete("/api/jira/config", (req: Request, res: Response) => {
-  jiraConfig = null;
-  savePersistedConfig(null);
-  res.json({ success: true, message: "Jira config cleared" });
+  res.json({ success: true, message: "Jira config cleared on client" });
 });
 
 /**
  * GET /api/jira/config
- * Check if Jira is configured
+ * Check if Jira is configured (returns info from headers)
  */
 app.get("/api/jira/config", (req: Request, res: Response) => {
-  if (jiraConfig) {
-    res.json({
-      configured: true,
-      instanceUrl: jiraConfig.instanceUrl,
-      email: jiraConfig.email,
-    });
-  } else {
-    res.json({ configured: false });
-  }
+  const config = (req as any).jiraConfig;
+  res.json({
+    configured: true,
+    instanceUrl: config.instanceUrl,
+    email: config.email,
+  });
 });
 
 /**
  * GET /api/jira/api/*
  * Proxy GET requests to Jira API
  */
-app.get("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response) => {
+app.get("/api/jira/api/*", async (req: Request, res: Response) => {
   try {
+    const config = (req as any).jiraConfig;
     // Extract everything after /api/jira/api from the original URL
     const match = req.originalUrl.match(/^\/api\/jira\/api(.*)$/);
     const endpoint = match ? match[1] : "";
@@ -297,7 +496,7 @@ app.get("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response
     
     console.log(`[PROXY GET] Endpoint: ${endpoint}`);
 
-    const response = await makeJiraRequest("GET", endpoint);
+    const response = await makeJiraRequestWithConfig(config, "GET", endpoint);
     const data = await response.json();
 
     res.status(response.status).json(data);
@@ -313,8 +512,9 @@ app.get("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response
  * POST /api/jira/api/*
  * Proxy POST requests to Jira API
  */
-app.post("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response) => {
+app.post("/api/jira/api/*", async (req: Request, res: Response) => {
   try {
+    const config = (req as any).jiraConfig;
     const match = req.originalUrl.match(/^\/api\/jira\/api(.*)$/);
     const endpoint = match ? match[1] : "";
     
@@ -324,7 +524,7 @@ app.post("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respons
     
     console.log(`[PROXY POST] Endpoint: ${endpoint}`);
 
-    const response = await makeJiraRequest("POST", endpoint, req.body);
+    const response = await makeJiraRequestWithConfig(config, "POST", endpoint, req.body);
     const data = await response.json();
 
     res.status(response.status).json(data);
@@ -340,7 +540,7 @@ app.post("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respons
  * PUT /api/jira/api/*
  * Proxy PUT requests to Jira API
  */
-app.put("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response) => {
+app.put("/api/jira/api/*", async (req: Request, res: Response) => {
   try {
     const match = req.originalUrl.match(/^\/api\/jira\/api(.*)$/);
     const endpoint = match ? match[1] : "";
@@ -351,7 +551,7 @@ app.put("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response
     
     console.log(`[PROXY PUT] Endpoint: ${endpoint}`);
 
-    const response = await makeJiraRequest("PUT", endpoint, req.body);
+    const response = await makeJiraRequest(req, "PUT", endpoint, req.body);
 
     if (response.status === 204) {
       res.status(204).send();
@@ -371,7 +571,7 @@ app.put("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response
  * PATCH /api/jira/api/*
  * Proxy PATCH requests to Jira API
  */
-app.patch("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response) => {
+app.patch("/api/jira/api/*", async (req: Request, res: Response) => {
   try {
     const match = req.originalUrl.match(/^\/api\/jira\/api(.*)$/);
     const endpoint = match ? match[1] : "";
@@ -382,7 +582,7 @@ app.patch("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respon
     
     console.log(`[PROXY PATCH] Endpoint: ${endpoint}`);
 
-    const response = await makeJiraRequest("PATCH", endpoint, req.body);
+    const response = await makeJiraRequest(req, "PATCH", endpoint, req.body);
 
    if (response.status === 204) {
       res.status(204).send();
@@ -402,7 +602,7 @@ app.patch("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respon
  * DELETE /api/jira/api/*
  * Proxy DELETE requests to Jira API
  */
-app.delete("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Response) => {
+app.delete("/api/jira/api/*", async (req: Request, res: Response) => {
   try {
     const match = req.originalUrl.match(/^\/api\/jira\/api(.*)$/);
     const endpoint = match ? match[1] : "";
@@ -413,7 +613,7 @@ app.delete("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respo
     
     console.log(`[PROXY DELETE] Endpoint: ${endpoint}`);
 
-    const response = await makeJiraRequest("DELETE", endpoint);
+    const response = await makeJiraRequest(req, "DELETE", endpoint);
 
     if ((response as any).status === 204) {
       res.status(204).send();
@@ -433,31 +633,41 @@ app.delete("/api/jira/api/*", requireJiraConfig, async (req: Request, res: Respo
  * POST /api/jira/search
  * Search issues using JQL (new /rest/api/3/search/jql endpoint)
  */
-app.post("/api/jira/search", requireJiraConfig, async (req: Request, res: Response) => {
+app.post("/api/jira/search", async (req: Request, res: Response) => {
   try {
     const { jql, maxResults = 50, startAt = 0, fields } = req.body;
 
-    if (!jql) {
+    if (!jql || typeof jql !== "string") {
       return res.status(400).json({ error: "JQL query is required" });
     }
 
-    if (!jiraConfig) {
+    const scopedProjectKeys = extractProjectKeysFromJql(jql);
+    if (scopedProjectKeys.length === 0) {
       return res.status(400).json({
-        error: "Jira configuration not found. Please configure Jira first.",
+        error: "JQL must include explicit project scope (e.g. project = ABC or project in (ABC, XYZ))",
       });
     }
 
-    const url = new URL(`${jiraConfig.instanceUrl}/rest/api/3/search/jql`);
+    const authorizedProjectKeys = await getAuthorizedProjectKeys(req);
+    const unauthorizedProjects = scopedProjectKeys.filter((key) => !authorizedProjectKeys.has(key));
+    if (unauthorizedProjects.length > 0) {
+      return res.status(403).json({
+        error: `JQL includes unauthorized project keys: ${unauthorizedProjects.join(", ")}`,
+      });
+    }
+
+    const config = (req as any).jiraConfig;
+    const url = new URL(`${config.instanceUrl}/rest/api/3/search/jql`);
     url.searchParams.append("jql", jql);
-    url.searchParams.append("maxResults", maxResults.toString());
-    url.searchParams.append("startAt", startAt.toString());
+    url.searchParams.append("maxResults", Math.min(Math.max(Number(maxResults) || 50, 1), 100).toString());
+    url.searchParams.append("startAt", Math.max(Number(startAt) || 0, 0).toString());
 
     if (fields && Array.isArray(fields)) {
       url.searchParams.append("fields", fields.join(","));
     }
 
     const authHeader = `Basic ${Buffer.from(
-      `${jiraConfig.email}:${jiraConfig.apiToken}`
+      `${config.email}:${config.apiToken}`
     ).toString("base64")}`;
 
     const response = await fetch(url.toString(), {
@@ -469,17 +679,25 @@ app.post("/api/jira/search", requireJiraConfig, async (req: Request, res: Respon
     });
 
     const data = await response.json();
+    const jiraErrorPayload = isJiraJqlErrorPayload(data);
 
-    if (!response.ok) {
-      console.error("[JQL SEARCH ERROR]", data);
+    if (!response.ok || jiraErrorPayload) {
+      console.error("[JQL SEARCH ERROR]", {
+        status: response.status,
+        jiraErrorPayload: data,
+      });
+
+      if (response.status === 400 || jiraErrorPayload) {
+        return res.status(400).json({ error: "Invalid query" });
+      }
+
+      return res.status(502).json({ error: "Search request failed" });
     }
 
-    res.status(response.status).json(data);
+    return res.status(200).json(data);
   } catch (error) {
     console.error("[JQL SEARCH ERROR]", error);
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "JQL search failed",
-    });
+    return res.status(500).json({ error: "Search request failed" });
   }
 });
 
@@ -487,14 +705,14 @@ app.post("/api/jira/search", requireJiraConfig, async (req: Request, res: Respon
  * GET /api/jira/watchers/:issueKey
  * Get watchers for a specific issue
  */
-app.get("/api/jira/watchers/:issueKey", requireJiraConfig, async (req: Request, res: Response) => {
+app.get("/api/jira/watchers/:issueKey", async (req: Request, res: Response) => {
   try {
     const { issueKey } = req.params;
     if (!issueKey) {
       return res.status(400).json({ error: "Issue key is required" });
     }
 
-    const response = await makeJiraRequest("GET", `/issue/${issueKey}/watchers`);
+    const response = await makeJiraRequest(req, "GET", `/issue/${issueKey}/watchers`);
     const data = await response.json();
 
     res.status((response as any).status).json(data);
@@ -510,7 +728,7 @@ app.get("/api/jira/watchers/:issueKey", requireJiraConfig, async (req: Request, 
  * GET /api/jira/issue/:issueKey/comment
  * Get comments for a specific issue
  */
-app.get("/api/jira/issue/:issueKey/comment", requireJiraConfig, async (req: Request, res: Response) => {
+app.get("/api/jira/issue/:issueKey/comment", async (req: Request, res: Response) => {
   try {
     const { issueKey } = req.params;
     
@@ -520,7 +738,7 @@ app.get("/api/jira/issue/:issueKey/comment", requireJiraConfig, async (req: Requ
 
     console.log(`[COMMENTS] Fetching comments for ${issueKey}`);
 
-    const response = await makeJiraRequest("GET", `/issue/${issueKey}?fields=comment`);
+    const response = await makeJiraRequest(req, "GET", `/issue/${issueKey}?fields=comment`);
     
     if (!response.ok) {
       throw new Error(`Jira API returned ${response.status}`);
@@ -544,9 +762,9 @@ app.get("/api/jira/issue/:issueKey/comment", requireJiraConfig, async (req: Requ
  * GET /api/jira/current-user
  * Get current user information
  */
-app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: Response) => {
+app.get("/api/jira/current-user", async (req: Request, res: Response) => {
   try {
-    const response = await makeJiraRequest("GET", `/myself`);
+    const response = await makeJiraRequest(req, "GET", `/myself`);
     const data = await response.json();
 
     res.status((response as any).status).json(data);
@@ -562,7 +780,7 @@ app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: R
  * GET /api/jira/projects
  * Get all projects accessible by the current user
  */
-app.get("/api/jira/projects", requireJiraConfig, async (req: Request, res: Response) => {
+app.get("/api/jira/projects", async (req: Request, res: Response) => {
   try {
     // Fetch all projects with pagination
     let allProjects: Array<{ id: string; key: string; name: string; projectTypeKey: string }> = [];
@@ -572,6 +790,7 @@ app.get("/api/jira/projects", requireJiraConfig, async (req: Request, res: Respo
 
     while (!isLast) {
       const response = await makeJiraRequest(
+        req,
         "GET",
         `/project/search?startAt=${startAt}&maxResults=${maxResults}&orderBy=name&expand=lead`
       );
@@ -610,7 +829,7 @@ app.get("/api/jira/projects", requireJiraConfig, async (req: Request, res: Respo
  * POST /api/jira/check-user-commented
  * Check if current user has commented on specific tickets
  */
-app.post("/api/jira/check-user-commented", requireJiraConfig, async (req: Request, res: Response) => {
+app.post("/api/jira/check-user-commented",  async (req: Request, res: Response) => {
   try {
     const { issueKeys } = req.body;
     if (!issueKeys || !Array.isArray(issueKeys)) {
@@ -618,7 +837,7 @@ app.post("/api/jira/check-user-commented", requireJiraConfig, async (req: Reques
     }
 
     // Get current user
-    const userResponse = await makeJiraRequest("GET", `/myself`);
+    const userResponse = await makeJiraRequest(req, "GET", `/myself`);
     const currentUser = await userResponse.json();
     const currentUserEmail = currentUser.emailAddress;
 
@@ -627,7 +846,7 @@ app.post("/api/jira/check-user-commented", requireJiraConfig, async (req: Reques
 
     for (const issueKey of issueKeys) {
       try {
-        const commentsResponse = await makeJiraRequest("GET", `/issues/${issueKey}?fields=comment`);
+        const commentsResponse = await makeJiraRequest(req, "GET", `/issues/${issueKey}?fields=comment`);
         const issueData = await commentsResponse.json();
         
         if (issueData.fields && issueData.fields.comment) {
@@ -659,7 +878,7 @@ app.post("/api/jira/check-user-commented", requireJiraConfig, async (req: Reques
  * POST /api/jira/check-watching
  * Check if current user is watching specific issues
  */
-app.post("/api/jira/check-watching", requireJiraConfig, async (req: Request, res: Response) => {
+app.post("/api/jira/check-watching",  async (req: Request, res: Response) => {
   try {
     const { issueKeys } = req.body;
     if (!issueKeys || !Array.isArray(issueKeys)) {
@@ -667,7 +886,7 @@ app.post("/api/jira/check-watching", requireJiraConfig, async (req: Request, res
     }
 
     // Get current user
-    const userResponse = await makeJiraRequest("GET", `/myself`);
+    const userResponse = await makeJiraRequest(req, "GET", `/myself`);
     if (!userResponse.ok) {
       throw new Error("Failed to get current user");
     }
@@ -677,7 +896,7 @@ app.post("/api/jira/check-watching", requireJiraConfig, async (req: Request, res
     const watchingStatus: { [key: string]: boolean } = {};
     
     for (const issueKey of issueKeys) {
-      const watchersResponse = await makeJiraRequest("GET", `/issue/${issueKey}/watchers`);
+      const watchersResponse = await makeJiraRequest(req, "GET", `/issue/${issueKey}/watchers`);
       if (watchersResponse.ok) {
         const watchersData = await watchersResponse.json();
         const watchers = watchersData.watchers || [];
@@ -701,7 +920,7 @@ app.post("/api/jira/check-watching", requireJiraConfig, async (req: Request, res
  * POST /api/jira/watch-ticket
  * Add current user as watcher to an issue
  */
-app.post("/api/jira/watch-ticket", requireJiraConfig, async (req: Request, res: Response) => {
+app.post("/api/jira/watch-ticket",  async (req: Request, res: Response) => {
   try {
     const { issueKey } = req.body;
     if (!issueKey) {
@@ -709,14 +928,14 @@ app.post("/api/jira/watch-ticket", requireJiraConfig, async (req: Request, res: 
     }
 
     // Get current user
-    const userResponse = await makeJiraRequest("GET", `/myself`);
+    const userResponse = await makeJiraRequest(req, "GET", `/myself`);
     if (!userResponse.ok) {
       throw new Error("Failed to get current user");
     }
     const currentUser = await userResponse.json();
 
     // Add current user as watcher
-    const watchResponse = await makeJiraRequest("POST", `/issue/${issueKey}/watchers`, {
+    const watchResponse = await makeJiraRequest(req, "POST", `/issue/${issueKey}/watchers`, {
       accountId: (currentUser as any).accountId,
     });
 
@@ -1039,25 +1258,27 @@ function clearBoardAdminCache() {
   boardCacheBuiltAt = null;
 }
 
-async function buildBoardAdminCache(projects: string[]): Promise<void> {
+async function buildBoardAdminCache(projects: string[], config: JiraConfig): Promise<void> {
   if (boardCacheBuiltAt && Date.now() - boardCacheBuiltAt < BOARD_CACHE_TTL_MS) return;
   const newAdminMap = new Map<number, Set<string>>();
   const newNameMap = new Map<number, string>();
   await Promise.allSettled(
     projects.map(async (key) => {
       try {
-        const res = await makeAgileRequest("GET", `/board?projectKeyOrId=${key}`);
+        const res = await makeAgileRequest(config, "GET", `/board?projectKeyOrId=${key}`);
         if (!res.ok) return;
         const data = await res.json() as { values?: Array<{ id: number; name: string }> };
         for (const board of data.values || []) {
           newNameMap.set(board.id, board.name);
-          const detailRes = await makeAgileRequest("GET", `/board/${board.id}`);
+          const detailRes = await makeAgileRequest(config, "GET", `/board/${board.id}`);
           if (!detailRes.ok) continue;
           const detail = await detailRes.json() as { admins?: { users?: Array<{ accountId: string }> } };
           const adminIds = new Set((detail.admins?.users || []).map((u) => u.accountId));
           newAdminMap.set(board.id, adminIds);
         }
-      } catch {}
+      } catch (error) {
+        console.warn(`[BOARD CACHE] Failed to fetch board data for project ${key}`, error);
+      }
     })
   );
   boardAdminMap = newAdminMap;
@@ -1719,7 +1940,7 @@ async function syncCommentToTarget(
 
   const attributionParagraph = {
     type: "paragraph",
-    content: [{ type: "text", text: `Posted by JiraTriage · ${issueKey}`, marks: [{ type: "em" }] }],
+    content: [{ type: "text", text: "Posted by JiraTriage", marks: [{ type: "em" }] }],
   };
 
   const postRes = await makeJiraRequestWithConfig(syncConfig, "POST", `/issue/${linkedKey}/comment`, {
@@ -1755,13 +1976,14 @@ async function syncCommentToTarget(
  * Core sync logic — shared between single and bulk sync endpoints.
  */
 async function internalSyncComment(
+  req: Request,
   issueKey: string,
   commentBody: string,
   commentId: string,
   author: string,
   syncedBy?: string
 ): Promise<InternalSyncOutcome> {
-  const syncConfig = getSyncJiraConfig();
+  const syncConfig = getSyncJiraConfig(req);
 
   const sourceIssueRes = await makeJiraRequestWithConfig(syncConfig, "GET", `/issue/${issueKey}?fields=issuelinks`);
   if (!sourceIssueRes.ok) {
@@ -1881,7 +2103,7 @@ async function internalSyncComment(
  */
 app.post(
   "/api/jira/sync-comment",
-  requireJiraConfig,
+  
   async (req: Request, res: Response) => {
     try {
       const { issueKey, commentBody, commentId = "", author = "Unknown", syncedBy, authorizedToPost = true } = req.body;
@@ -1907,7 +2129,7 @@ app.post(
         });
       }
 
-      const outcome = await internalSyncComment(issueKey, commentBody, commentId, author, syncedBy);
+      const outcome = await internalSyncComment(req, issueKey, commentBody, commentId, author, syncedBy);
       res.json({
         success: outcome.primaryRecord.status === "success" && outcome.mandatoryFailures.length === 0,
         targetKey: outcome.primaryRecord.targetKey,
@@ -1941,7 +2163,7 @@ app.post(
  */
 app.post(
   "/api/jira/sync-all",
-  requireJiraConfig,
+  
   async (req: Request, res: Response) => {
     try {
       const { comments } = req.body;
@@ -1970,7 +2192,7 @@ app.post(
         }
 
         try {
-          const outcome = await internalSyncComment(issueKey, commentBody, commentId, author, syncedBy);
+          const outcome = await internalSyncComment(req, issueKey, commentBody, commentId, author, syncedBy);
           results.push({
             issueKey,
             commentId,
@@ -2037,18 +2259,17 @@ async function runConcurrent<T>(
  */
 app.post(
   "/api/jira/auto-discover",
-  requireJiraConfig,
+  
   async (req: Request, res: Response) => {
     try {
       const { days = 1, maxIssues = 200, projectKeys = [] } = req.body || {};
+      const requestConfig = (req as any).jiraConfig as JiraConfig;
       const projects: string[] = Array.isArray(projectKeys) && projectKeys.length > 0
         ? projectKeys
         : ["Z10", "Z10LMC"]; // fallback if none provided
 
-      if (!jiraConfig) return res.status(400).json({ error: "Jira not configured" });
-
       const authHeader = `Basic ${Buffer.from(
-        `${jiraConfig.email}:${jiraConfig.apiToken}`
+        `${requestConfig.email}:${requestConfig.apiToken}`
       ).toString("base64")}`;
 
       // Compute JQL window: use lastSyncedAt for tight filtering when available,
@@ -2072,7 +2293,7 @@ app.post(
       await Promise.allSettled(
         jqlQueries.map(async (jql) => {
           try {
-            const url = new URL(`${jiraConfig!.instanceUrl}/rest/api/3/search/jql`);
+            const url = new URL(`${requestConfig.instanceUrl}/rest/api/3/search/jql`);
             url.searchParams.append("jql", jql);
             url.searchParams.append("maxResults", String(maxIssues));
             url.searchParams.append("fields", "key");
@@ -2102,10 +2323,10 @@ app.post(
       let currentUserAccountId = "";
       let currentUserDisplayName = "";
       await Promise.allSettled([
-        makeJiraRequest("GET", "/myself").then(async (r) => {
+        makeJiraRequest(req, "GET", "/myself").then(async (r) => {
           if (r.ok) { const d = await r.json(); currentUserAccountId = d.accountId || ""; currentUserDisplayName = d.displayName || ""; }
         }),
-        buildBoardAdminCache(projects),
+        buildBoardAdminCache(projects, requestConfig),
       ]);
 
       const results: Array<{
@@ -2132,7 +2353,7 @@ app.post(
       await runConcurrent(
         uniqueKeys,
         async (key) => {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment,issuelinks`);
+          const commentsRes = await makeJiraRequest(req, "GET", `/issue/${key}?fields=comment,sprint,attachment,issuelinks`);
           if (!commentsRes.ok) return;
           const data = await commentsRes.json();
           const issueLinks: Array<{
@@ -2195,7 +2416,7 @@ app.post(
               if (byName || byTime) {
                 commentAttachments.push({
                   name: att.filename,
-                  url: `${jiraConfig!.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
+                  url: `${requestConfig.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
                 });
                 mediaIdx++;
               }
@@ -2242,10 +2463,11 @@ app.post(
  */
 app.post(
   "/api/jira/poll-sync-comments",
-  requireJiraConfig,
+  
   async (req: Request, res: Response) => {
     try {
       const { issueKeys } = req.body;
+      const requestConfig = (req as any).jiraConfig as JiraConfig;
       if (!Array.isArray(issueKeys) || issueKeys.length === 0) {
         return res.status(400).json({ error: "issueKeys array is required" });
       }
@@ -2255,10 +2477,10 @@ app.post(
       let pollCurrentUserDisplayName = "";
       const pollProjects = [...new Set(issueKeys.map((k: string) => k.replace(/-\d+$/, "")))]; 
       await Promise.allSettled([
-        makeJiraRequest("GET", "/myself").then(async (r) => {
+        makeJiraRequest(req, "GET", "/myself").then(async (r) => {
           if (r.ok) { const d = await r.json(); pollCurrentUserAccountId = d.accountId || ""; pollCurrentUserDisplayName = d.displayName || ""; }
         }),
-        buildBoardAdminCache(pollProjects),
+        buildBoardAdminCache(pollProjects, requestConfig),
       ]);
 
       const results: Array<{
@@ -2283,7 +2505,7 @@ app.post(
 
       for (const key of issueKeys) {
         try {
-          const commentsRes = await makeJiraRequest("GET", `/issue/${key}?fields=comment,sprint,attachment,issuelinks`);
+          const commentsRes = await makeJiraRequest(req, "GET", `/issue/${key}?fields=comment,sprint,attachment,issuelinks`);
           if (!commentsRes.ok) continue;
           const data = await commentsRes.json();
           const issueLinks: Array<{
@@ -2349,7 +2571,7 @@ app.post(
               if (byName || byTime) {
                 commentAttachments.push({
                   name: att.filename,
-                  url: `${jiraConfig!.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
+                  url: `${requestConfig.instanceUrl}/secure/attachment/${att.id}/${encodeURIComponent(att.filename)}`,
                 });
                 mediaIdx++;
               }
@@ -2392,7 +2614,7 @@ app.post(
  * GET /api/jira/sync-history
  * Return the in-memory sync history.
  */
-app.get("/api/jira/sync-history", requireJiraConfig, (req: Request, res: Response) => {
+app.get("/api/jira/sync-history",  (req: Request, res: Response) => {
   res.json({ history: syncHistory, total: syncHistory.length });
 });
 
@@ -2400,7 +2622,7 @@ app.get("/api/jira/sync-history", requireJiraConfig, (req: Request, res: Respons
  * GET /api/jira/sync-debug-logs
  * Return last N lines from sync-debug.log for troubleshooting.
  */
-app.get("/api/jira/sync-debug-logs", requireJiraConfig, (req: Request, res: Response) => {
+app.get("/api/jira/sync-debug-logs",  (req: Request, res: Response) => {
   try {
     const tailParam = Number(req.query.tail || 200);
     const tail = Number.isFinite(tailParam) ? Math.max(1, Math.min(2000, tailParam)) : 200;
@@ -2421,9 +2643,9 @@ app.get("/api/jira/sync-debug-logs", requireJiraConfig, (req: Request, res: Resp
  * GET /api/jira/current-user
  * Returns the display name and email of the logged-in Jira user.
  */
-app.get("/api/jira/current-user", requireJiraConfig, async (req: Request, res: Response) => {
+app.get("/api/jira/current-user",  async (req: Request, res: Response) => {
   try {
-    const response = await makeJiraRequest("GET", "/myself");
+    const response = await makeJiraRequest(req, "GET", "/myself");
     const data = await response.json();
     res.json({
       displayName: data.displayName || "",
