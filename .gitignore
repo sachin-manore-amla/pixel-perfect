@@ -11,6 +11,13 @@ node_modules
 dist
 dist-ssr
 *.local
+.sync-state.json
+.jira-config.json
+
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
 
 # Editor directories and files
 .vscode/*

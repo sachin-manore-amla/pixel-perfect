@@ -3,6 +3,7 @@ import { AIPriorityScoring } from "@/components/AIPriorityScoring";
 import { AITicketSummaries } from "@/components/AITicketSummaries";
 import { AIActionDetection } from "@/components/AIActionDetection";
 import { AICommentTransform } from "@/components/AICommentTransform";
+import { AIP1Tickets15Days } from "@/components/AIP1Tickets15Days";
 import { Brain, Sparkles } from "lucide-react";
 
 const AIInsightsPage = () => {
@@ -28,6 +29,7 @@ const AIInsightsPage = () => {
 
         <AITicketSummaries />
         <AICommentTransform />
+        <AIP1Tickets15Days />
       </div>
     </DashboardLayout>
   );

@@ -1,8 +1,8 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @layer base {
   :root {
@@ -121,5 +121,30 @@
 
   .animate-slide-in {
     animation: slide-in-up 0.3s ease-out forwards;
+  }
+
+  /* ADF comment body renderer */
+  .adf-body p { margin-bottom: 0.5em; }
+  .adf-body p:last-child { margin-bottom: 0; }
+  .adf-body ul { list-style: disc; padding-left: 1.25em; margin-bottom: 0.5em; }
+  .adf-body ol { list-style: decimal; padding-left: 1.25em; margin-bottom: 0.5em; }
+  .adf-body li { margin-bottom: 0.2em; }
+  .adf-body strong { font-weight: 600; }
+  .adf-body em { font-style: italic; }
+  .adf-body code { background: hsl(var(--muted)); border-radius: 3px; padding: 0.1em 0.35em; font-family: var(--font-mono); font-size: 0.85em; }
+  .adf-body pre { background: hsl(var(--muted)); border-radius: 6px; padding: 0.75em 1em; overflow-x: auto; margin-bottom: 0.5em; }
+  .adf-body blockquote { border-left: 3px solid hsl(var(--border)); padding-left: 0.75em; color: hsl(var(--muted-foreground)); margin-bottom: 0.5em; }
+  .adf-body hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 0.75em 0; }
+  .adf-body h1,.adf-body h2,.adf-body h3,.adf-body h4 { font-weight: 600; margin-bottom: 0.4em; }
+  .adf-body a.adf-link { color: hsl(var(--primary)); text-decoration: underline; }
+  .adf-body .adf-mention {
+    display: inline-flex;
+    align-items: center;
+    background: hsl(142 71% 45% / 0.15);
+    color: hsl(142 71% 35%);
+    border-radius: 9999px;
+    padding: 0 0.45em;
+    font-weight: 600;
+    font-size: 0.82em;
   }
 }

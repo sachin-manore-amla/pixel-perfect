@@ -14,14 +14,14 @@ export interface AITicketInsight {
 
 export const aiInsights: AITicketInsight[] = [
   {
-    ticketKey: "OPS-101",
+    ticketKey: "Z10LMC-3001",
     priorityScore: 95,
     priorityReason: "Production payment gateway down — multiple customers impacted, escalation language detected in comments",
     sentiment: "critical",
     summary: "Payment gateway experiencing intermittent timeouts in production. Sarah Chen is investigating payment service logs. No root cause identified yet. Multiple customer-facing transactions failing.",
     actions: [
       { owner: "Sarah Chen", action: "Complete payment service log analysis", status: "pending" },
-      { owner: "DevOps", action: "Check load balancer health", status: "pending" },
+      { owner: "Hardik Sanjay Khedkar", action: "Check load balancer health", status: "pending" },
       { owner: "Manager", action: "Notify stakeholders of payment disruption", status: "pending" },
     ],
     originalInternalComment: "Investigating payment service logs — seeing connection pool saturation on primary DB replica. Might need to failover.",
@@ -29,13 +29,13 @@ export const aiInsights: AITicketInsight[] = [
     slaRisk: { likelihood: 78, minutesUntilBreach: 60 },
   },
   {
-    ticketKey: "OPS-098",
+    ticketKey: "Z10LMC-3002",
     priorityScore: 88,
     priorityReason: "SLA already breached — database connection pool exhaustion with active remediation in progress",
     sentiment: "urgent",
-    summary: "Database connection pool reached maximum capacity, causing cascading failures. Mike Torres increased pool size as interim fix. Monitoring ongoing but SLA has already been breached by 2 hours.",
+    summary: "Database connection pool reached maximum capacity, causing cascading failures. pankaj.walke@amla.io increased pool size as interim fix. Monitoring ongoing but SLA has already been breached by 2 hours.",
     actions: [
-      { owner: "Mike Torres", action: "Validate pool size increase is holding", status: "done" },
+      { owner: "Dnyanada Moharir", action: "Validate pool size increase is holding", status: "done" },
       { owner: "DBA Team", action: "Review connection leak sources", status: "pending" },
       { owner: "Manager", action: "Respond to latest update from Mike", status: "pending" },
     ],
@@ -43,7 +43,7 @@ export const aiInsights: AITicketInsight[] = [
     customerFriendlyComment: "We've applied an immediate fix to resolve the performance issues you may have experienced. Our team is implementing a permanent solution to prevent recurrence.",
   },
   {
-    ticketKey: "OPS-095",
+    ticketKey: "Z10LMC-3003",
     priorityScore: 92,
     priorityReason: "Unassigned P1 for 18 hours — auth service critical, no human response, SLA violated",
     sentiment: "critical",
@@ -56,31 +56,31 @@ export const aiInsights: AITicketInsight[] = [
     slaRisk: { likelihood: 100, minutesUntilBreach: null },
   },
   {
-    ticketKey: "OPS-087",
+    ticketKey: "Z10LMC-3004",
     priorityScore: 62,
     priorityReason: "Fix deployed to staging, awaiting QA — moderate risk, actively being worked",
     sentiment: "moderate",
-    summary: "CDN cache invalidation bug identified and fix deployed to staging environment. Priya Sharma completed the fix; now pending QA team verification before production deployment.",
+    summary: "CDN cache invalidation bug identified and fix deployed to staging environment. Prajakta Dhote completed the fix; now pending QA team verification before production deployment.",
     actions: [
       { owner: "QA Team", action: "Validate fix in staging environment", status: "pending" },
-      { owner: "Priya Sharma", action: "Prepare production deployment plan", status: "pending" },
+      { owner: "Prajakta Dhote", action: "Prepare production deployment plan", status: "pending" },
     ],
     originalInternalComment: "Fix deployed to staging, needs QA verification. Root cause was stale TTL config in CloudFront distribution.",
     customerFriendlyComment: "We've developed and tested a fix for the content delivery issue. It's currently in final validation before being released to production.",
   },
   {
-    ticketKey: "OPS-082",
+    ticketKey: "Z10LMC-3005",
     priorityScore: 55,
     priorityReason: "Active investigation with heap dump analysis — waiting state but progressing",
     sentiment: "moderate",
-    summary: "Memory leak in notification service causing gradual performance degradation. DevOps team performing heap dump analysis. Ticket in waiting state pending analysis results.",
+    summary: "Memory leak in notification service causing gradual performance degradation. Hardik Sanjay Khedkar team performing heap dump analysis. Ticket in waiting state pending analysis results.",
     actions: [
-      { owner: "DevOps", action: "Complete heap dump analysis", status: "pending" },
+      { owner: "Hardik Sanjay Khedkar", action: "Complete heap dump analysis", status: "pending" },
       { owner: "James Liu", action: "Implement fix once leak source identified", status: "pending" },
     ],
   },
   {
-    ticketKey: "EXT-210",
+    ticketKey: "Z10LMC-3009",
     priorityScore: 82,
     priorityReason: "Customer-facing dashboard failures — root cause found but fix not yet deployed",
     sentiment: "urgent",
@@ -93,7 +93,7 @@ export const aiInsights: AITicketInsight[] = [
     customerFriendlyComment: "We've identified the cause of the dashboard loading issues and are deploying a fix shortly. Your dashboard will be fully functional once the update is complete.",
   },
   {
-    ticketKey: "EXT-205",
+    ticketKey: "Z10LMC-3010",
     priorityScore: 90,
     priorityReason: "Enterprise clients impacted — unassigned for 5 days, high business risk",
     sentiment: "critical",
